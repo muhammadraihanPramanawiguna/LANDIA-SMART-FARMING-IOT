@@ -12,10 +12,8 @@ struct DHTData {
     bool valid;
 };
 
-
 // Inisialisasi DHT11
 void dhtInit();
-
 
 // Membaca DHT11
 DHTData dhtRead();

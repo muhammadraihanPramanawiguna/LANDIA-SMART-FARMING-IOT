@@ -1,22 +1,48 @@
+
 #include <Arduino.h>
+#include <math.h>
 
 #include "water_level.h"
 #include "config.h"
 
+// =====================================================
+// SENSOR CONFIGURATION
+// =====================================================
+
+// Jumlah sampel pembacaan.
+static constexpr int JSN_FILTER_SAMPLES = 5;
+
+// Minimum jumlah sampel valid yang dibutuhkan.
+static constexpr int JSN_MIN_VALID_SAMPLES = 3;
+
+// Jarak minimum pembacaan JSN-SR04M.
+// Perlu disesuaikan dengan varian sensor yang digunakan.
+static constexpr float JSN_MIN_VALID_DISTANCE_CM = 20.0f;
+
+// Timeout pembacaan ECHO.
+static constexpr unsigned long JSN_TIMEOUT_US = 30000UL;
+
+// Jeda antarpengukuran untuk mengurangi pantulan
+// dari pengukuran sebelumnya.
+static constexpr unsigned long JSN_SAMPLE_INTERVAL_MS = 60UL;
+
 
 // =====================================================
-// INTERNAL CONFIGURATION
+// CONFIGURATION VALIDATION
 // =====================================================
 
-// Jumlah pembacaan untuk filtering
-#define JSN_FILTER_SAMPLES 5
+static bool isValidWaterLevelConfig() {
 
-// JSN-SR04M umumnya kurang reliable pada jarak sangat dekat.
-// Nilai ini jangan dibuat lebih kecil dari kemampuan sensor.
-#define JSN_MIN_VALID_DISTANCE_CM 20.0f
+    return
+        isfinite(WATER_LEVEL_FULL_DISTANCE_CM) &&
+        isfinite(WATER_LEVEL_EMPTY_DISTANCE_CM) &&
 
-// Timeout pulse ECHO
-#define JSN_TIMEOUT_US 30000UL
+        WATER_LEVEL_FULL_DISTANCE_CM >=
+            JSN_MIN_VALID_DISTANCE_CM &&
+
+        WATER_LEVEL_EMPTY_DISTANCE_CM >
+            WATER_LEVEL_FULL_DISTANCE_CM;
+}
 
 
 // =====================================================
@@ -25,69 +51,50 @@
 
 void waterLevelInit() {
 
-    pinMode(
-        JSN_TRIG_PIN,
-        OUTPUT
-    );
+    pinMode(JSN_TRIG_PIN, OUTPUT);
 
-    pinMode(
-        JSN_ECHO_PIN,
-        INPUT
-    );
+    pinMode(JSN_ECHO_PIN, INPUT);
 
-
-    // Pastikan TRIG LOW
-    digitalWrite(
-        JSN_TRIG_PIN,
-        LOW
-    );
-
+    // Pastikan TRIG LOW saat inisialisasi.
+    digitalWrite(JSN_TRIG_PIN, LOW);
 
     Serial.println(
         "[JSN] Water level sensor initialized"
     );
 
-
-    Serial.print(
-        "[JSN] Full distance  : "
-    );
+    Serial.print("[JSN] Full distance: ");
 
     Serial.print(
         WATER_LEVEL_FULL_DISTANCE_CM,
         1
     );
 
-    Serial.println(
-        " cm"
-    );
+    Serial.println(" cm");
 
-
-    Serial.print(
-        "[JSN] Empty distance : "
-    );
+    Serial.print("[JSN] Empty distance: ");
 
     Serial.print(
         WATER_LEVEL_EMPTY_DISTANCE_CM,
         1
     );
 
-    Serial.println(
-        " cm"
-    );
+    Serial.println(" cm");
 
-
-    Serial.print(
-        "[JSN] Min valid dist : "
-    );
+    Serial.print("[JSN] Minimum valid distance: ");
 
     Serial.print(
         JSN_MIN_VALID_DISTANCE_CM,
         1
     );
 
-    Serial.println(
-        " cm"
-    );
+    Serial.println(" cm");
+
+    if (!isValidWaterLevelConfig()) {
+
+        Serial.println(
+            "[JSN] ERROR: Invalid water level configuration"
+        );
+    }
 }
 
 
@@ -98,53 +105,39 @@ void waterLevelInit() {
 float readDistanceCm() {
 
     // -------------------------------------------------
-    // Trigger LOW
+    // TRIGGER LOW
     // -------------------------------------------------
 
-    digitalWrite(
-        JSN_TRIG_PIN,
-        LOW
-    );
+    digitalWrite(JSN_TRIG_PIN, LOW);
 
     delayMicroseconds(2);
 
-
     // -------------------------------------------------
-    // Trigger HIGH
+    // TRIGGER HIGH
     // -------------------------------------------------
 
-    digitalWrite(
-        JSN_TRIG_PIN,
-        HIGH
-    );
+    digitalWrite(JSN_TRIG_PIN, HIGH);
 
     delayMicroseconds(10);
 
+    // -------------------------------------------------
+    // TRIGGER LOW
+    // -------------------------------------------------
+
+    digitalWrite(JSN_TRIG_PIN, LOW);
 
     // -------------------------------------------------
-    // Trigger LOW
+    // READ ECHO
     // -------------------------------------------------
 
-    digitalWrite(
-        JSN_TRIG_PIN,
-        LOW
+    const unsigned long duration = pulseIn(
+        JSN_ECHO_PIN,
+        HIGH,
+        JSN_TIMEOUT_US
     );
 
-
     // -------------------------------------------------
-    // Read ECHO
-    // -------------------------------------------------
-
-    unsigned long duration =
-        pulseIn(
-            JSN_ECHO_PIN,
-            HIGH,
-            JSN_TIMEOUT_US
-        );
-
-
-    // -------------------------------------------------
-    // Timeout
+    // TIMEOUT VALIDATION
     // -------------------------------------------------
 
     if (duration == 0) {
@@ -152,61 +145,51 @@ float readDistanceCm() {
         return -1.0f;
     }
 
+    // -------------------------------------------------
+    // CONVERT DURATION TO DISTANCE
+    // -------------------------------------------------
+
+    const float distance =
+        static_cast<float>(duration) *
+        0.0343f /
+        2.0f;
 
     // -------------------------------------------------
-    // Convert duration to centimeter
-    // -------------------------------------------------
-
-    float distance =
-        duration * 0.0343f / 2.0f;
-
-
-    // -------------------------------------------------
-    // Validate minimum distance
+    // DISTANCE VALIDATION
     // -------------------------------------------------
 
     if (
+        !isfinite(distance) ||
         distance < JSN_MIN_VALID_DISTANCE_CM
     ) {
 
         return -1.0f;
     }
 
-
     return distance;
 }
 
 
 // =====================================================
-// SORT ARRAY
+// SORT DISTANCES
 // =====================================================
 
-void sortDistances(
+static void sortDistances(
     float values[],
     int count
 ) {
 
-    for (
-        int i = 0;
-        i < count - 1;
-        i++
-    ) {
+    for (int i = 0; i < count - 1; i++) {
 
-        for (
-            int j = i + 1;
-            j < count;
-            j++
-        ) {
+        for (int j = i + 1; j < count; j++) {
 
-            if (
-                values[j] < values[i]
-            ) {
+            if (values[j] < values[i]) {
 
-                float temp = values[i];
+                const float temporary = values[i];
 
                 values[i] = values[j];
 
-                values[j] = temp;
+                values[j] = temporary;
             }
         }
     }
@@ -219,15 +202,12 @@ void sortDistances(
 
 float readFilteredDistanceCm() {
 
-    float samples[
-        JSN_FILTER_SAMPLES
-    ];
+    float samples[JSN_FILTER_SAMPLES];
 
     int validSamples = 0;
 
-
     // -------------------------------------------------
-    // Take multiple readings
+    // TAKE MULTIPLE READINGS
     // -------------------------------------------------
 
     for (
@@ -236,39 +216,39 @@ float readFilteredDistanceCm() {
         i++
     ) {
 
-        float distance =
-            readDistanceCm();
+        const float distance = readDistanceCm();
 
+        if (
+            isfinite(distance) &&
+            distance >= JSN_MIN_VALID_DISTANCE_CM
+        ) {
 
-        if (distance >= 0.0f) {
-
-            samples[
-                validSamples
-            ] = distance;
+            samples[validSamples] = distance;
 
             validSamples++;
         }
 
-
-        // Beri waktu antar pembacaan
-        delay(60);
+        // Jeda antar pembacaan.
+        delay(JSN_SAMPLE_INTERVAL_MS);
     }
 
-
     // -------------------------------------------------
-    // Not enough valid samples
+    // VALIDATE SAMPLE COUNT
     // -------------------------------------------------
 
     if (
-        validSamples == 0
+        validSamples < JSN_MIN_VALID_SAMPLES
     ) {
+
+        Serial.print("[JSN] Insufficient valid samples: ");
+
+        Serial.println(validSamples);
 
         return -1.0f;
     }
 
-
     // -------------------------------------------------
-    // Sort valid samples
+    // SORT VALID SAMPLES
     // -------------------------------------------------
 
     sortDistances(
@@ -276,32 +256,21 @@ float readFilteredDistanceCm() {
         validSamples
     );
 
-
     // -------------------------------------------------
-    // Median
+    // CALCULATE MEDIAN
     // -------------------------------------------------
 
-    if (
-        validSamples % 2 == 1
-    ) {
+    const int middle = validSamples / 2;
 
-        // Jumlah ganjil
-        return samples[
-            validSamples / 2
-        ];
+    if (validSamples % 2 == 1) {
 
-    } else {
-
-        // Jumlah genap
-        int middle =
-            validSamples / 2;
-
-        return (
-            samples[middle - 1]
-            +
-            samples[middle]
-        ) / 2.0f;
+        return samples[middle];
     }
+
+    return (
+        samples[middle - 1] +
+        samples[middle]
+    ) / 2.0f;
 }
 
 
@@ -314,14 +283,21 @@ float calculateWaterLevelPercent(
 ) {
 
     // -------------------------------------------------
-    // FULL
+    // VALIDATE INPUT
     // -------------------------------------------------
-    //
-    // Jika permukaan air lebih dekat atau sama
-    // dengan batas FULL:
-    //
-    // 100%
-    //
+
+    if (
+        !isfinite(distanceCm) ||
+        distanceCm < 0.0f ||
+        !isValidWaterLevelConfig()
+    ) {
+
+        return -1.0f;
+    }
+
+    // -------------------------------------------------
+    // FULL CONDITION
+    // -------------------------------------------------
 
     if (
         distanceCm <=
@@ -331,16 +307,9 @@ float calculateWaterLevelPercent(
         return 100.0f;
     }
 
-
     // -------------------------------------------------
-    // EMPTY
+    // EMPTY CONDITION
     // -------------------------------------------------
-    //
-    // Jika permukaan air lebih jauh atau sama
-    // dengan batas EMPTY:
-    //
-    // 0%
-    //
 
     if (
         distanceCm >=
@@ -350,41 +319,36 @@ float calculateWaterLevelPercent(
         return 0.0f;
     }
 
-
     // -------------------------------------------------
-    // LINEAR CALCULATION
+    // LINEAR INTERPOLATION
     // -------------------------------------------------
 
-    float waterLevelPercent =
+    const float waterLevelPercent =
         (
             (
-                WATER_LEVEL_EMPTY_DISTANCE_CM
-                -
+                WATER_LEVEL_EMPTY_DISTANCE_CM -
                 distanceCm
-            )
-            /
+            ) /
             (
-                WATER_LEVEL_EMPTY_DISTANCE_CM
-                -
+                WATER_LEVEL_EMPTY_DISTANCE_CM -
                 WATER_LEVEL_FULL_DISTANCE_CM
             )
-        )
-        * 100.0f;
+        ) * 100.0f;
 
+    if (!isfinite(waterLevelPercent)) {
+
+        return -1.0f;
+    }
 
     // -------------------------------------------------
-    // SAFETY LIMIT
+    // LIMIT PERCENTAGE
     // -------------------------------------------------
 
-    waterLevelPercent =
-        constrain(
-            waterLevelPercent,
-            0.0f,
-            100.0f
-        );
-
-
-    return waterLevelPercent;
+    return constrain(
+        waterLevelPercent,
+        0.0f,
+        100.0f
+    );
 }
 
 
@@ -394,36 +358,40 @@ float calculateWaterLevelPercent(
 
 WaterLevelData waterLevelRead() {
 
-    WaterLevelData data;
+    WaterLevelData data = {};
 
+    data.distanceCm = -1.0f;
+
+    data.waterLevelPercent = 0.0f;
+
+    data.valid = false;
 
     // -------------------------------------------------
-    // DEFAULT DATA
+    // CONFIGURATION VALIDATION
     // -------------------------------------------------
 
-    data.distanceCm =
-        -1.0f;
+    if (!isValidWaterLevelConfig()) {
 
-    data.waterLevelPercent =
-        0.0f;
+        Serial.println(
+            "[JSN] Invalid sensor configuration"
+        );
 
-    data.valid =
-        false;
-
+        return data;
+    }
 
     // -------------------------------------------------
     // READ FILTERED DISTANCE
     // -------------------------------------------------
 
-    float distance =
+    const float distance =
         readFilteredDistanceCm();
 
-
     // -------------------------------------------------
-    // INVALID READING
+    // INVALID DISTANCE
     // -------------------------------------------------
 
     if (
+        !isfinite(distance) ||
         distance < 0.0f
     ) {
 
@@ -434,32 +402,35 @@ WaterLevelData waterLevelRead() {
         return data;
     }
 
-
-    // -------------------------------------------------
-    // SAVE DISTANCE
-    // -------------------------------------------------
-
-    data.distanceCm =
-        distance;
-
-
     // -------------------------------------------------
     // CALCULATE WATER LEVEL
     // -------------------------------------------------
 
-    data.waterLevelPercent =
-        calculateWaterLevelPercent(
-            distance
+    const float percentage =
+        calculateWaterLevelPercent(distance);
+
+    if (
+        !isfinite(percentage) ||
+        percentage < 0.0f ||
+        percentage > 100.0f
+    ) {
+
+        Serial.println(
+            "[JSN] Invalid water level percentage"
         );
 
+        return data;
+    }
 
     // -------------------------------------------------
-    // VALID DATA
+    // SAVE VALID DATA
     // -------------------------------------------------
 
-    data.valid =
-        true;
+    data.distanceCm = distance;
 
+    data.waterLevelPercent = percentage;
+
+    data.valid = true;
 
     return data;
 }

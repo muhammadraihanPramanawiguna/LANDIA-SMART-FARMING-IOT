@@ -21,7 +21,11 @@ static RTC_DS3231 rtc;
 // RTC STATUS
 // =====================================================
 
+// Menunjukkan apakah perangkat DS3231 berhasil dideteksi.
 static bool rtcAvailable = false;
+
+// Menunjukkan apakah waktu di dalam DS3231 sudah valid.
+static bool rtcTimeValid = false;
 
 // =====================================================
 // NTP STATE
@@ -39,11 +43,145 @@ static const unsigned long NTP_RETRY_INTERVAL_MS =
 static const unsigned long NTP_SYNC_INTERVAL_MS =
     21600000UL; // 6 jam
 
+static const long NTP_TIMEZONE_OFFSET_SECONDS =
+    7L * 3600L; // WIB UTC+7
+
+static const int RTC_MIN_YEAR = 2020;
+static const int RTC_MAX_YEAR = 2099;
+
+// =====================================================
+// HELPER: LEAP YEAR
+// =====================================================
+
+static bool isLeapYear(int year) {
+
+    return (
+        (year % 400 == 0) ||
+        (
+            year % 4 == 0 &&
+            year % 100 != 0
+        )
+    );
+}
+
+// =====================================================
+// HELPER: DAYS IN MONTH
+// =====================================================
+
+static int getDaysInMonth(
+    int year,
+    int month
+) {
+
+    static const int daysPerMonth[] = {
+        31, 28, 31, 30,
+        31, 30, 31, 31,
+        30, 31, 30, 31
+    };
+
+    if (month < 1 || month > 12) {
+        return 0;
+    }
+
+    if (
+        month == 2 &&
+        isLeapYear(year)
+    ) {
+        return 29;
+    }
+
+    return daysPerMonth[month - 1];
+}
+
+// =====================================================
+// HELPER: VALIDATE DATE AND TIME
+// =====================================================
+
+static bool isValidDateTime(
+    int year,
+    int month,
+    int day,
+    int hour,
+    int minute,
+    int second
+) {
+
+    if (
+        year < RTC_MIN_YEAR ||
+        year > RTC_MAX_YEAR
+    ) {
+        return false;
+    }
+
+    if (
+        month < 1 ||
+        month > 12
+    ) {
+        return false;
+    }
+
+    const int maxDays = getDaysInMonth(
+        year,
+        month
+    );
+
+    if (
+        day < 1 ||
+        day > maxDays
+    ) {
+        return false;
+    }
+
+    if (
+        hour < 0 ||
+        hour > 23
+    ) {
+        return false;
+    }
+
+    if (
+        minute < 0 ||
+        minute > 59
+    ) {
+        return false;
+    }
+
+    if (
+        second < 0 ||
+        second > 59
+    ) {
+        return false;
+    }
+
+    return true;
+}
+
+// =====================================================
+// HELPER: VALIDATE RTC DATE OBJECT
+// =====================================================
+
+static bool isValidRTCDateTime(
+    const DateTime& dateTime
+) {
+
+    return isValidDateTime(
+        dateTime.year(),
+        dateTime.month(),
+        dateTime.day(),
+        dateTime.hour(),
+        dateTime.minute(),
+        dateTime.second()
+    );
+}
+
 // =====================================================
 // HELPER: GET MONTH NUMBER FROM COMPILE DATE
 // =====================================================
 
-static int getCompileMonth(const char* month) {
+static int getCompileMonth(
+    const char* month
+) {
+
     const char* months[] = {
         "Jan", "Feb", "Mar", "Apr",
         "May", "Jun", "Jul", "Aug",
@@ -51,12 +189,19 @@ static int getCompileMonth(const char* month) {
     };
 
     for (int i = 0; i < 12; i++) {
-        if (strncmp(month, months[i], 3) == 0) {
+
+        if (
+            strncmp(
+                month,
+                months[i],
+                3
+            ) == 0
+        ) {
             return i + 1;
         }
     }
 
-    return 1;
+    return 0;
 }
 
 // =====================================================
@@ -64,16 +209,25 @@ static int getCompileMonth(const char* month) {
 // =====================================================
 
 // Fallback ketika RTC kehilangan daya.
-// Waktu ini berasal dari komputer saat firmware di-compile.
+//
+// Catatan:
+// Waktu ini berasal dari komputer saat firmware
+// di-compile. Pastikan timezone komputer WIB.
 
 static bool rtcSetFromCompileTime() {
+
     char monthText[4] = {0};
 
     int day = 0;
     int year = 0;
+
     int hour = 0;
     int minute = 0;
     int second = 0;
+
+    // -------------------------------------------------
+    // PARSE COMPILE DATE
+    // -------------------------------------------------
 
     if (
         sscanf(
@@ -84,11 +238,17 @@ static bool rtcSetFromCompileTime() {
             &year
         ) != 3
     ) {
+
         Serial.println(
             "[RTC] ERROR: Cannot parse compile date"
         );
+
         return false;
     }
+
+    // -------------------------------------------------
+    // PARSE COMPILE TIME
+    // -------------------------------------------------
 
     if (
         sscanf(
@@ -99,33 +259,43 @@ static bool rtcSetFromCompileTime() {
             &second
         ) != 3
     ) {
+
         Serial.println(
             "[RTC] ERROR: Cannot parse compile time"
         );
+
         return false;
     }
 
-    const int month = getCompileMonth(monthText);
+    const int month = getCompileMonth(
+        monthText
+    );
+
+    // -------------------------------------------------
+    // VALIDATE COMPILE TIME
+    // -------------------------------------------------
 
     if (
-        year < 2020 ||
-        year > 2099 ||
-        month < 1 ||
-        month > 12 ||
-        day < 1 ||
-        day > 31 ||
-        hour < 0 ||
-        hour > 23 ||
-        minute < 0 ||
-        minute > 59 ||
-        second < 0 ||
-        second > 59
+        !isValidDateTime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second
+        )
     ) {
+
         Serial.println(
-            "[RTC] ERROR: Invalid compile time"
+            "[RTC] ERROR: Invalid compile date/time"
         );
+
         return false;
     }
+
+    // -------------------------------------------------
+    // UPDATE RTC
+    // -------------------------------------------------
 
     rtc.adjust(
         DateTime(
@@ -138,12 +308,19 @@ static bool rtcSetFromCompileTime() {
         )
     );
 
+    rtcTimeValid = true;
+
     Serial.println(
         "[RTC] RTC initialized from firmware compile time"
     );
 
-    Serial.print("[RTC] Timestamp: ");
-    Serial.println(rtcGetTimestamp());
+    Serial.print(
+        "[RTC] Timestamp: "
+    );
+
+    Serial.println(
+        rtcGetTimestamp()
+    );
 
     return true;
 }
@@ -153,13 +330,33 @@ static bool rtcSetFromCompileTime() {
 // =====================================================
 
 void rtcInit() {
+
+    rtcAvailable = false;
+    rtcTimeValid = false;
+
+    ntpConfigured = false;
+    ntpWasConnected = false;
+
+    lastNtpAttemptMillis = 0;
+    lastNtpSuccessMillis = 0;
+
+    // -------------------------------------------------
+    // INITIALIZE I2C
+    // -------------------------------------------------
+
     Wire.begin(
         I2C_SDA_PIN,
         I2C_SCL_PIN
     );
 
+    // -------------------------------------------------
+    // INITIALIZE DS3231
+    // -------------------------------------------------
+
     if (!rtc.begin()) {
+
         rtcAvailable = false;
+        rtcTimeValid = false;
 
         Serial.println(
             "[RTC] ERROR: DS3231 not detected!"
@@ -170,9 +367,16 @@ void rtcInit() {
 
     rtcAvailable = true;
 
-    Serial.println("[RTC] DS3231 initialized");
+    Serial.println(
+        "[RTC] DS3231 initialized"
+    );
+
+    // -------------------------------------------------
+    // CHECK POWER LOSS
+    // -------------------------------------------------
 
     if (rtc.lostPower()) {
+
         Serial.println(
             "[RTC] WARNING: RTC lost power"
         );
@@ -182,17 +386,68 @@ void rtcInit() {
         );
 
         if (rtcSetFromCompileTime()) {
+
             Serial.println(
                 "[RTC] Compile-time fallback successful"
             );
+
         } else {
+
+            rtcTimeValid = false;
+
             Serial.println(
                 "[RTC] ERROR: Compile-time fallback failed"
             );
+
+            Serial.println(
+                "[RTC] Waiting for valid NTP or manual time"
+            );
         }
+
     } else {
+
+        // -------------------------------------------------
+        // CHECK EXISTING RTC TIME
+        // -------------------------------------------------
+
+        const DateTime now = rtc.now();
+
+        if (isValidRTCDateTime(now)) {
+
+            rtcTimeValid = true;
+
+            Serial.println(
+                "[RTC] Existing RTC time retained"
+            );
+
+        } else {
+
+            rtcTimeValid = false;
+
+            Serial.println(
+                "[RTC] WARNING: Existing RTC time is invalid"
+            );
+        }
+    }
+
+    // -------------------------------------------------
+    // DISPLAY RTC STATUS
+    // -------------------------------------------------
+
+    if (rtcTimeValid) {
+
+        Serial.print(
+            "[RTC] Current time: "
+        );
+
         Serial.println(
-            "[RTC] Existing RTC time retained"
+            rtcGetTimestamp()
+        );
+
+    } else {
+
+        Serial.println(
+            "[RTC] Time is not valid yet"
         );
     }
 }
@@ -202,6 +457,7 @@ void rtcInit() {
 // =====================================================
 
 bool rtcIsAvailable() {
+
     return rtcAvailable;
 }
 
@@ -210,6 +466,7 @@ bool rtcIsAvailable() {
 // =====================================================
 
 RTCData rtcRead() {
+
     RTCData data = {};
 
     data.year = 0;
@@ -222,11 +479,33 @@ RTCData rtcRead() {
 
     data.valid = false;
 
-    if (!rtcAvailable) {
+    if (
+        !rtcAvailable ||
+        !rtcTimeValid
+    ) {
         return data;
     }
 
     const DateTime now = rtc.now();
+
+    // -------------------------------------------------
+    // VALIDATE RTC TIME
+    // -------------------------------------------------
+
+    if (!isValidRTCDateTime(now)) {
+
+        rtcTimeValid = false;
+
+        Serial.println(
+            "[RTC] ERROR: Invalid RTC date/time detected"
+        );
+
+        return data;
+    }
+
+    // -------------------------------------------------
+    // COPY RTC DATA
+    // -------------------------------------------------
 
     data.year = now.year();
     data.month = now.month();
@@ -235,24 +514,6 @@ RTCData rtcRead() {
     data.hour = now.hour();
     data.minute = now.minute();
     data.second = now.second();
-
-    if (
-        data.year < 2020 ||
-        data.year > 2099 ||
-        data.month < 1 ||
-        data.month > 12 ||
-        data.day < 1 ||
-        data.day > 31 ||
-        data.hour < 0 ||
-        data.hour > 23 ||
-        data.minute < 0 ||
-        data.minute > 59 ||
-        data.second < 0 ||
-        data.second > 59
-    ) {
-        data.valid = false;
-        return data;
-    }
 
     data.valid = true;
 
@@ -264,11 +525,22 @@ RTCData rtcRead() {
 // =====================================================
 
 String rtcGetTimestamp() {
-    if (!rtcAvailable) {
+
+    if (
+        !rtcAvailable ||
+        !rtcTimeValid
+    ) {
         return "INVALID";
     }
 
     const DateTime now = rtc.now();
+
+    if (!isValidRTCDateTime(now)) {
+
+        rtcTimeValid = false;
+
+        return "INVALID";
+    }
 
     char timestamp[20];
 
@@ -292,11 +564,22 @@ String rtcGetTimestamp() {
 // =====================================================
 
 String rtcGetDate() {
-    if (!rtcAvailable) {
+
+    if (
+        !rtcAvailable ||
+        !rtcTimeValid
+    ) {
         return "INVALID";
     }
 
     const DateTime now = rtc.now();
+
+    if (!isValidRTCDateTime(now)) {
+
+        rtcTimeValid = false;
+
+        return "INVALID";
+    }
 
     char dateBuffer[11];
 
@@ -317,11 +600,22 @@ String rtcGetDate() {
 // =====================================================
 
 String rtcGetTime() {
-    if (!rtcAvailable) {
+
+    if (
+        !rtcAvailable ||
+        !rtcTimeValid
+    ) {
         return "INVALID";
     }
 
     const DateTime now = rtc.now();
+
+    if (!isValidRTCDateTime(now)) {
+
+        rtcTimeValid = false;
+
+        return "INVALID";
+    }
 
     char timeBuffer[9];
 
@@ -341,7 +635,7 @@ String rtcGetTime() {
 // MANUAL SET RTC
 // =====================================================
 
-// Untuk maintenance atau pengaturan waktu manual.
+// Digunakan untuk maintenance atau pengaturan waktu manual.
 
 bool rtcSetDateTime(
     int year,
@@ -351,7 +645,9 @@ bool rtcSetDateTime(
     int minute,
     int second
 ) {
+
     if (!rtcAvailable) {
+
         Serial.println(
             "[RTC] ERROR: RTC unavailable"
         );
@@ -359,26 +655,31 @@ bool rtcSetDateTime(
         return false;
     }
 
+    // -------------------------------------------------
+    // VALIDATE INPUT
+    // -------------------------------------------------
+
     if (
-        year < 2020 ||
-        year > 2099 ||
-        month < 1 ||
-        month > 12 ||
-        day < 1 ||
-        day > 31 ||
-        hour < 0 ||
-        hour > 23 ||
-        minute < 0 ||
-        minute > 59 ||
-        second < 0 ||
-        second > 59
+        !isValidDateTime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second
+        )
     ) {
+
         Serial.println(
             "[RTC] ERROR: Invalid manual date/time"
         );
 
         return false;
     }
+
+    // -------------------------------------------------
+    // UPDATE RTC
+    // -------------------------------------------------
 
     rtc.adjust(
         DateTime(
@@ -391,12 +692,25 @@ bool rtcSetDateTime(
         )
     );
 
+    rtcTimeValid = true;
+
+    // -------------------------------------------------
+    // RESET NTP SYNC TIMER
+    // -------------------------------------------------
+
+    lastNtpSuccessMillis = 0;
+
     Serial.println(
         "[RTC] Time successfully updated manually"
     );
 
-    Serial.print("[RTC] Timestamp: ");
-    Serial.println(rtcGetTimestamp());
+    Serial.print(
+        "[RTC] Timestamp: "
+    );
+
+    Serial.println(
+        rtcGetTimestamp()
+    );
 
     return true;
 }
@@ -406,21 +720,39 @@ bool rtcSetDateTime(
 // =====================================================
 
 // Return true hanya jika RTC benar-benar dikoreksi.
-// Fungsi ini tidak menggantikan kontrol lokal ketika offline.
+//
+// Jika Wi-Fi terputus:
+// - RTC tetap digunakan.
+// - Tidak ada perubahan waktu RTC.
+//
+// Jika Wi-Fi tersedia:
+// - ESP32 mencoba sinkronisasi NTP.
+// - RTC dikoreksi jika selisih waktu lebih dari 5 detik.
 
-bool rtcNtpSyncUpdate(bool wifiConnected) {
+bool rtcNtpSyncUpdate(
+    bool wifiConnected
+) {
+
     if (!rtcAvailable) {
         return false;
     }
 
-    // -------------------------------------------------
+    // =================================================
     // WIFI DISCONNECTED
-    // -------------------------------------------------
+    // =================================================
 
     if (!wifiConnected) {
+
         if (ntpWasConnected) {
+
             ntpConfigured = false;
+
             lastNtpAttemptMillis = 0;
+
+            // Memastikan sinkronisasi dapat dicoba
+            // kembali setelah Wi-Fi tersambung.
+
+            lastNtpSuccessMillis = 0;
 
             Serial.println(
                 "[NTP] Wi-Fi disconnected; retaining RTC time"
@@ -432,27 +764,33 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
         return false;
     }
 
-    // -------------------------------------------------
+    // =================================================
     // WIFI RECONNECTED
-    // -------------------------------------------------
+    // =================================================
 
     if (!ntpWasConnected) {
+
         ntpWasConnected = true;
+
         ntpConfigured = false;
+
         lastNtpAttemptMillis = 0;
+
+        lastNtpSuccessMillis = 0;
 
         Serial.println(
             "[NTP] Wi-Fi connected; preparing synchronization"
         );
     }
 
-    // -------------------------------------------------
+    // =================================================
     // CONFIGURE NTP
-    // -------------------------------------------------
+    // =================================================
 
     if (!ntpConfigured) {
+
         configTime(
-            7 * 3600,
+            NTP_TIMEZONE_OFFSET_SECONDS,
             0,
             "pool.ntp.org",
             "time.google.com",
@@ -468,9 +806,9 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
 
     const unsigned long nowMillis = millis();
 
-    // -------------------------------------------------
+    // =================================================
     // PERIODIC SYNCHRONIZATION
-    // -------------------------------------------------
+    // =================================================
 
     if (
         lastNtpSuccessMillis != 0 &&
@@ -480,9 +818,9 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
         return false;
     }
 
-    // -------------------------------------------------
+    // =================================================
     // RETRY LIMIT
-    // -------------------------------------------------
+    // =================================================
 
     if (
         lastNtpAttemptMillis != 0 &&
@@ -494,18 +832,20 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
 
     lastNtpAttemptMillis = nowMillis;
 
-    // -------------------------------------------------
-    // REQUIRE ACTUAL SNTP SYNCHRONIZATION
-    // -------------------------------------------------
+    // =================================================
+    // REQUIRE SUCCESSFUL SNTP SYNCHRONIZATION
+    // =================================================
 
     // getLocalTime() saja tidak membuktikan bahwa waktu
-    // baru diterima dari server NTP. Waktu sistem bisa
-    // saja masih berasal dari nilai sebelumnya.
+    // baru diterima dari server NTP.
+    //
+    // Karena itu status SNTP juga harus diperiksa.
 
     if (
         sntp_get_sync_status() !=
         SNTP_SYNC_STATUS_COMPLETED
     ) {
+
         Serial.println(
             "[NTP] Waiting for successful SNTP synchronization"
         );
@@ -513,13 +853,14 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
         return false;
     }
 
-    // -------------------------------------------------
+    // =================================================
     // READ SYSTEM TIME
-    // -------------------------------------------------
+    // =================================================
 
     struct tm ntpTime = {};
 
     if (!getLocalTime(&ntpTime, 10)) {
+
         Serial.println(
             "[NTP] System time unavailable; retaining RTC"
         );
@@ -535,24 +876,21 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
     const int minute = ntpTime.tm_min;
     const int second = ntpTime.tm_sec;
 
-    // -------------------------------------------------
+    // =================================================
     // VALIDATE NTP TIME
-    // -------------------------------------------------
+    // =================================================
 
     if (
-        year < 2024 ||
-        year > 2099 ||
-        month < 1 ||
-        month > 12 ||
-        day < 1 ||
-        day > 31 ||
-        hour < 0 ||
-        hour > 23 ||
-        minute < 0 ||
-        minute > 59 ||
-        second < 0 ||
-        second > 59
+        !isValidDateTime(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second
+        )
     ) {
+
         Serial.println(
             "[NTP] Invalid time rejected"
         );
@@ -569,10 +907,60 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
         second
     );
 
+    // =================================================
+    // RTC TIME NOT VALID
+    // =================================================
+
+    // Jika DS3231 terdeteksi tetapi waktunya invalid,
+    // waktu NTP yang valid dapat langsung digunakan.
+
+    if (!rtcTimeValid) {
+
+        rtc.adjust(ntpDateTime);
+
+        rtcTimeValid = true;
+
+        lastNtpSuccessMillis = millis();
+
+        Serial.println(
+            "[NTP] RTC initialized using NTP time"
+        );
+
+        Serial.print(
+            "[NTP] RTC time: "
+        );
+
+        Serial.println(
+            rtcGetTimestamp()
+        );
+
+        return true;
+    }
+
+    // =================================================
+    // READ CURRENT RTC TIME
+    // =================================================
+
     const DateTime rtcDateTime = rtc.now();
 
-    // Kedua DateTime dibandingkan dalam representasi
-    // tanggal/jam lokal yang sama (WIB).
+    if (!isValidRTCDateTime(rtcDateTime)) {
+
+        rtcTimeValid = false;
+
+        Serial.println(
+            "[NTP] RTC time invalid; waiting for next synchronization"
+        );
+
+        return false;
+    }
+
+    // =================================================
+    // CALCULATE TIME DIFFERENCE
+    // =================================================
+
+    // Kedua DateTime menggunakan representasi waktu lokal
+    // yang sama, yaitu WIB.
+
     long differenceSeconds =
         (long)ntpDateTime.unixtime() -
         (long)rtcDateTime.unixtime();
@@ -581,16 +969,25 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
         differenceSeconds = -differenceSeconds;
     }
 
-    Serial.print("[NTP] RTC difference: ");
-    Serial.print(differenceSeconds);
-    Serial.println(" seconds");
+    Serial.print(
+        "[NTP] RTC difference: "
+    );
 
-    // -------------------------------------------------
+    Serial.print(
+        differenceSeconds
+    );
+
+    Serial.println(
+        " seconds"
+    );
+
+    // =================================================
     // TIME ALREADY ACCURATE
-    // -------------------------------------------------
+    // =================================================
 
     if (differenceSeconds <= 5) {
-        lastNtpSuccessMillis = nowMillis;
+
+        lastNtpSuccessMillis = millis();
 
         Serial.println(
             "[NTP] RTC already accurate; no correction needed"
@@ -599,16 +996,23 @@ bool rtcNtpSyncUpdate(bool wifiConnected) {
         return false;
     }
 
-    // -------------------------------------------------
+    // =================================================
     // CORRECT RTC
-    // -------------------------------------------------
+    // =================================================
 
     rtc.adjust(ntpDateTime);
 
+    rtcTimeValid = true;
+
     lastNtpSuccessMillis = millis();
 
-    Serial.print("[NTP] RTC corrected to WIB: ");
-    Serial.println(rtcGetTimestamp());
+    Serial.print(
+        "[NTP] RTC corrected to WIB: "
+    );
+
+    Serial.println(
+        rtcGetTimestamp()
+    );
 
     return true;
 }

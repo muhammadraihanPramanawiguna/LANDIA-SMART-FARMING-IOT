@@ -14,7 +14,6 @@ void lcdInit();
 // =====================================================
 
 void lcdUpdate(
-
     float temperature,
     float humidity,
 

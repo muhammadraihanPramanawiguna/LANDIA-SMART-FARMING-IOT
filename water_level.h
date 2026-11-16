@@ -3,11 +3,6 @@
 
 #include <Arduino.h>
 
-
-// =====================================================
-// WATER LEVEL DATA
-// =====================================================
-
 struct WaterLevelData {
 
     float distanceCm;
@@ -17,19 +12,9 @@ struct WaterLevelData {
     bool valid;
 };
 
-
-// =====================================================
-// FUNCTIONS
-// =====================================================
-
 void waterLevelInit();
 
 WaterLevelData waterLevelRead();
-
-
-// =====================================================
-// INTERNAL FUNCTIONS
-// =====================================================
 
 float readDistanceCm();
 

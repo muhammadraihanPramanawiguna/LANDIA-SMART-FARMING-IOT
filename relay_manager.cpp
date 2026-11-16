@@ -1,4 +1,6 @@
+
 #include <Arduino.h>
+
 #include "config.h"
 #include "relay_manager.h"
 
@@ -10,15 +12,48 @@ static bool relayState = false;
 
 
 // =====================================================
+// RELAY OUTPUT CONFIGURATION
+// =====================================================
+
+// Relay active-low:
+// LOW  = ON
+// HIGH = OFF
+
+static constexpr uint8_t RELAY_ON_LEVEL =
+    RELAY_ACTIVE_LOW ? LOW : HIGH;
+
+static constexpr uint8_t RELAY_OFF_LEVEL =
+    RELAY_ACTIVE_LOW ? HIGH : LOW;
+
+
+// =====================================================
 // RELAY INITIALIZATION
 // =====================================================
 
 void relayInit() {
 
-    pinMode(RELAY_PIN, OUTPUT);
+    // Atur level OFF sebelum pin menjadi OUTPUT
+    // untuk mengurangi risiko pulsa ON saat inisialisasi.
 
-    // Relay OFF saat ESP32 pertama kali menyala
-    relayOff();
+    digitalWrite(
+        RELAY_PIN,
+        RELAY_OFF_LEVEL
+    );
+
+    pinMode(
+        RELAY_PIN,
+        OUTPUT
+    );
+
+    relayState = false;
+
+    Serial.println(
+        "[RELAY] Relay initialized"
+    );
+
+    Serial.println(
+        "[RELAY] Initial state: OFF"
+    );
 }
 
 
@@ -28,9 +63,16 @@ void relayInit() {
 
 void relayOn() {
 
-    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(
+        RELAY_PIN,
+        RELAY_ON_LEVEL
+    );
 
     relayState = true;
+
+    Serial.println(
+        "[RELAY] Pump command: ON"
+    );
 }
 
 
@@ -40,9 +82,16 @@ void relayOn() {
 
 void relayOff() {
 
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(
+        RELAY_PIN,
+        RELAY_OFF_LEVEL
+    );
 
     relayState = false;
+
+    Serial.println(
+        "[RELAY] Pump command: OFF"
+    );
 }
 
 

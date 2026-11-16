@@ -1,5 +1,8 @@
-#ifndef RELAY_MANAGER_H
-#define RELAY_MANAGER_H
+
+#ifndef LANDIA_RELAY_MANAGER_H
+#define LANDIA_RELAY_MANAGER_H
+
+#include <Arduino.h>
 
 // =====================================================
 // RELAY FUNCTIONS

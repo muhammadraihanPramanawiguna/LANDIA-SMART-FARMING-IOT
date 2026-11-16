@@ -1,8 +1,9 @@
+
 #include "dht_sensor.h"
 #include "config.h"
 
 #include <DHT.h>
-
+#include <math.h>
 
 // =====================================================
 // DHT CONFIGURATION
@@ -10,12 +11,34 @@
 
 #define DHT_TYPE DHT11
 
-
-// Object DHT
-DHT dht(
+// Object DHT.
+static DHT dht(
     DHT_PIN,
     DHT_TYPE
 );
+
+
+// =====================================================
+// SENSOR DATA VALIDATION
+// =====================================================
+
+static bool isValidDHTData(
+    float temperature,
+    float humidity
+) {
+
+    return
+        isfinite(temperature) &&
+        isfinite(humidity) &&
+
+        // Batas kewajaran data suhu.
+        temperature >= -40.0f &&
+        temperature <= 80.0f &&
+
+        // Kelembapan relatif harus 0-100%.
+        humidity >= 0.0f &&
+        humidity <= 100.0f;
+}
 
 
 // =====================================================
@@ -27,8 +50,14 @@ void dhtInit() {
     dht.begin();
 
     Serial.println(
-        "[DHT] Sensor initialized"
+        "[DHT] DHT11 sensor initialized"
     );
+
+    Serial.print(
+        "[DHT] GPIO: "
+    );
+
+    Serial.println(DHT_PIN);
 }
 
 
@@ -38,47 +67,63 @@ void dhtInit() {
 
 DHTData dhtRead() {
 
-    DHTData data;
+    DHTData data = {};
 
-    // Default state
+    // -------------------------------------------------
+    // DEFAULT DATA
+    // -------------------------------------------------
+
     data.temperature = NAN;
+
     data.humidity = NAN;
+
     data.valid = false;
 
 
-    // Read humidity
-    float humidity =
+    // -------------------------------------------------
+    // READ HUMIDITY
+    // -------------------------------------------------
+
+    const float humidity =
         dht.readHumidity();
 
 
-    // Read temperature
-    float temperature =
+    // -------------------------------------------------
+    // READ TEMPERATURE
+    // -------------------------------------------------
+
+    const float temperature =
         dht.readTemperature();
 
 
-    // Check invalid reading
+    // -------------------------------------------------
+    // VALIDATE SENSOR DATA
+    // -------------------------------------------------
+
     if (
-        isnan(humidity) ||
-        isnan(temperature)
+        !isValidDHTData(
+            temperature,
+            humidity
+        )
     ) {
 
         Serial.println(
-            "[DHT] Failed to read sensor"
+            "[DHT] Invalid sensor reading"
         );
 
         return data;
     }
 
 
-    // Store valid data
-    data.temperature =
-        temperature;
+    // -------------------------------------------------
+    // SAVE VALID DATA
+    // -------------------------------------------------
 
-    data.humidity =
-        humidity;
+    data.temperature = temperature;
 
-    data.valid =
-        true;
+    data.humidity = humidity;
+
+    data.valid = true;
 
 
     return data;

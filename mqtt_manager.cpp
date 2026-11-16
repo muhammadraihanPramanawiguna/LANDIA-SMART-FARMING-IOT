@@ -19,7 +19,7 @@
 const char* WIFI_SSID = "AYU";
 const char* WIFI_PASSWORD = "ayu241283";
 
-const char* MQTT_SERVER = "192.168.0.234";
+const char* MQTT_SERVER = "192.168.0.190";
 const uint16_t MQTT_PORT = 1883;
 
 const char* MQTT_CLIENT_ID = "landia-esp32-01";

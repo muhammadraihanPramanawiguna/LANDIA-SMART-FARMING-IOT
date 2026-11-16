@@ -1,17 +1,48 @@
+
 #include "flow_sensor.h"
 #include "config.h"
+
+#include <math.h>
 
 // =====================================================
 // INTERNAL VARIABLES
 // =====================================================
 
-volatile unsigned long pulseCount = 0;
+// Jumlah pulsa yang dihitung oleh interrupt.
+static volatile unsigned long pulseCount = 0;
 
-unsigned long lastFlowMillis = 0;
+// Jumlah pulsa pada interval pengukuran terakhir.
+static unsigned long lastPulseCount = 0;
 
-float flowRateLMin = 0.0f;
+// Akumulasi seluruh pulsa sejak total di-reset.
+static unsigned long totalPulseCount = 0;
 
-float totalLitres = 0.0f;
+// Waktu pengukuran terakhir.
+static unsigned long lastFlowMillis = 0;
+
+// Hasil pengukuran.
+static float flowRateLMin = 0.0f;
+static float totalLitres = 0.0f;
+
+// Status validitas data.
+static bool flowDataValid = false;
+
+// ESP32 critical section untuk melindungi akses
+// variabel pulseCount antara ISR dan program utama.
+static portMUX_TYPE flowMux =
+    portMUX_INITIALIZER_UNLOCKED;
+
+
+// =====================================================
+// CALIBRATION VALIDATION
+// =====================================================
+
+static bool isValidCalibrationFactor() {
+
+    return
+        isfinite(FLOW_CALIBRATION_FACTOR) &&
+        FLOW_CALIBRATION_FACTOR > 0.0f;
+}
 
 
 // =====================================================
@@ -20,7 +51,11 @@ float totalLitres = 0.0f;
 
 void IRAM_ATTR flowPulseCounter() {
 
+    portENTER_CRITICAL_ISR(&flowMux);
+
     pulseCount++;
+
+    portEXIT_CRITICAL_ISR(&flowMux);
 }
 
 
@@ -30,20 +65,23 @@ void IRAM_ATTR flowPulseCounter() {
 
 void flowInit() {
 
-    pinMode(
-        FLOW_PIN,
-        INPUT_PULLUP
-    );
+    pinMode(FLOW_PIN, INPUT_PULLUP);
 
+    portENTER_CRITICAL(&flowMux);
 
     pulseCount = 0;
 
-    lastFlowMillis = millis();
+    portEXIT_CRITICAL(&flowMux);
+
+    lastPulseCount = 0;
+    totalPulseCount = 0;
 
     flowRateLMin = 0.0f;
-
     totalLitres = 0.0f;
 
+    lastFlowMillis = millis();
+
+    flowDataValid = false;
 
     attachInterrupt(
         digitalPinToInterrupt(FLOW_PIN),
@@ -51,19 +89,21 @@ void flowInit() {
         FALLING
     );
 
+    Serial.println("[FLOW] Sensor initialized");
 
-    Serial.println(
-        "[FLOW] Sensor initialized"
-    );
+    Serial.print("[FLOW] Calibration factor: ");
 
-    Serial.print(
-        "[FLOW] Calibration factor: "
-    );
+    Serial.print(FLOW_CALIBRATION_FACTOR, 2);
 
-    Serial.println(
-        FLOW_CALIBRATION_FACTOR,
-        2
-    );
+    Serial.println(" pulses/liter");
+
+    if (!isValidCalibrationFactor()) {
+
+        Serial.println(
+            "[FLOW] ERROR: Invalid calibration factor"
+        );
+
+    }
 }
 
 
@@ -73,71 +113,109 @@ void flowInit() {
 
 void flowUpdate() {
 
-    unsigned long currentMillis =
-        millis();
+    const unsigned long currentMillis = millis();
 
+    const unsigned long elapsedMillis =
+        currentMillis - lastFlowMillis;
 
-    // Update setiap 1 detik
+    // Pengukuran dilakukan minimal setiap 1 detik.
+    // Jika pemanggilan terlambat, waktu aktual tetap digunakan.
 
-    if (
-        currentMillis -
-        lastFlowMillis <
-        1000UL
-    ) {
+    if (elapsedMillis < 1000UL) {
+        return;
+    }
+
+    // -------------------------------------------------
+    // VALIDATE CALIBRATION
+    // -------------------------------------------------
+
+    if (!isValidCalibrationFactor()) {
+
+        flowRateLMin = 0.0f;
+        flowDataValid = false;
+
+        lastFlowMillis = currentMillis;
 
         return;
     }
 
-
     // -------------------------------------------------
-    // READ PULSE
+    // READ PULSE SAFELY
     // -------------------------------------------------
 
-    noInterrupts();
+    unsigned long pulses = 0;
 
-    unsigned long pulses =
-        pulseCount;
+    portENTER_CRITICAL(&flowMux);
+
+    pulses = pulseCount;
 
     pulseCount = 0;
 
-    interrupts();
+    portEXIT_CRITICAL(&flowMux);
 
+    lastPulseCount = pulses;
 
     // -------------------------------------------------
     // CALCULATE FLOW RATE
     // -------------------------------------------------
 
+    // Calibration factor:
+    // pulses per liter.
+    //
+    // Flow rate:
+    // (pulses * 60000) /
+    // (calibration factor * elapsed milliseconds)
+
     flowRateLMin =
         (
-            pulses * 60.0f
-        )
-        /
+            static_cast<float>(pulses) *
+            60000.0f
+        ) /
+        (
+            FLOW_CALIBRATION_FACTOR *
+            static_cast<float>(elapsedMillis)
+        );
+
+    // -------------------------------------------------
+    // UPDATE TOTAL PULSE
+    // -------------------------------------------------
+
+    totalPulseCount += pulses;
+
+    // -------------------------------------------------
+    // CALCULATE TOTAL VOLUME
+    // -------------------------------------------------
+
+    totalLitres =
+        static_cast<float>(totalPulseCount) /
         FLOW_CALIBRATION_FACTOR;
 
-
     // -------------------------------------------------
-    // CALCULATE VOLUME
-    // -------------------------------------------------
-    //
-    // Karena update dilakukan setiap ±1 detik:
-    //
-    // L/min / 60 = L/sec
-    //
-
-    float litresThisSecond =
-        flowRateLMin / 60.0f;
-
-
-    totalLitres +=
-        litresThisSecond;
-
-
-    // -------------------------------------------------
-    // UPDATE TIMER
+    // VALIDATE RESULT
     // -------------------------------------------------
 
-    lastFlowMillis =
-        currentMillis;
+    if (
+        !isfinite(flowRateLMin) ||
+        !isfinite(totalLitres) ||
+        flowRateLMin < 0.0f ||
+        totalLitres < 0.0f
+    ) {
+
+        flowRateLMin = 0.0f;
+        flowDataValid = false;
+
+        lastFlowMillis = currentMillis;
+
+        return;
+    }
+
+    // -------------------------------------------------
+    // UPDATE STATUS
+    // -------------------------------------------------
+
+    flowDataValid = true;
+
+    lastFlowMillis = currentMillis;
 }
 
 
@@ -147,28 +225,21 @@ void flowUpdate() {
 
 FlowData flowRead() {
 
-    FlowData data;
+    FlowData data = {};
 
+    data.pulseCount = lastPulseCount;
 
-    data.pulseCount = 0;
+    data.flowRateLMin = flowRateLMin;
 
-    data.flowRateLMin =
-        flowRateLMin;
-
-    data.totalLitres =
-        totalLitres;
+    data.totalLitres = totalLitres;
 
     data.totalCubicMeter =
         totalLitres / 1000.0f;
 
-
     data.totalCost =
-        totalLitres *
-        WATER_COST_PER_LITER;
+        totalLitres * WATER_COST_PER_LITER;
 
-
-    data.valid = true;
-
+    data.valid = flowDataValid;
 
     return data;
 }
@@ -180,22 +251,24 @@ FlowData flowRead() {
 
 void flowResetTotal() {
 
-    noInterrupts();
+    // Reset pulsa yang sedang menunggu dibaca.
+    portENTER_CRITICAL(&flowMux);
 
     pulseCount = 0;
 
-    interrupts();
+    portEXIT_CRITICAL(&flowMux);
 
+    lastPulseCount = 0;
 
-    flowRateLMin = 0.0f;
+    totalPulseCount = 0;
 
     totalLitres = 0.0f;
 
-    lastFlowMillis =
-        millis();
+    flowRateLMin = 0.0f;
 
+    lastFlowMillis = millis();
 
-    Serial.println(
-        "[FLOW] Total usage reset"
-    );
+    flowDataValid = false;
+
+    Serial.println("[FLOW] Total usage reset");
 }

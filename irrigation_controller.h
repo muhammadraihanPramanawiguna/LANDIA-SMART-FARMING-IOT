@@ -31,16 +31,12 @@ enum IrrigationState {
 // INITIALIZATION
 // =====================================================
 
-// Inisialisasi pengendali irigasi.
-// Relay harus berada dalam kondisi OFF saat boot.
 void irrigationInit();
 
 // =====================================================
 // UPDATE
 // =====================================================
 
-// Evaluasi jadwal, sensor, dan kondisi keselamatan irigasi.
-// Dipanggil secara berkala dari main.ino.
 void irrigationUpdate(
     const RTCData& rtc,
     const SoilData& soil,
@@ -53,9 +49,6 @@ void irrigationUpdate(
 // RTC CORRECTION SAFETY
 // =====================================================
 
-// Dipanggil ketika RTC benar-benar dikoreksi oleh NTP.
-// Digunakan untuk mencegah koreksi waktu memicu jadwal
-// irigasi secara tidak sengaja.
 void irrigationNotifyTimeCorrection(
     const RTCData& rtc
 );
@@ -64,27 +57,22 @@ void irrigationNotifyTimeCorrection(
 // IRRIGATION STATE
 // =====================================================
 
-// Memeriksa apakah irigasi sedang aktif.
 bool irrigationIsActive();
 
-// Mengambil status irigasi saat ini.
 IrrigationState irrigationGetState();
 
 // =====================================================
 // SESSION DATA
 // =====================================================
 
-// Mengambil total liter air pada sesi irigasi terakhir.
 float irrigationGetSessionLitres();
 
-// Mengambil estimasi biaya sesi irigasi terakhir.
 float irrigationGetSessionCost();
 
 // =====================================================
 // MANUAL SAFETY STOP
 // =====================================================
 
-// Menghentikan irigasi secara paksa.
 void irrigationEmergencyStop();
 
 #endif // IRRIGATION_CONTROLLER_H

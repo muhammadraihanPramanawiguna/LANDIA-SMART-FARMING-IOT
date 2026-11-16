@@ -1,28 +1,44 @@
+
 #include <Arduino.h>
-
 #include "scheduler.h"
-
 
 // =====================================================
 // LAST EXECUTION TIME
 // =====================================================
 
 static unsigned long lastDHT = 0;
-
 static unsigned long lastSoil = 0;
-
 static unsigned long lastRain = 0;
-
 static unsigned long lastFlow = 0;
-
 static unsigned long lastWaterLevel = 0;
 
 static unsigned long lastRTC = 0;
-
 static unsigned long lastLCD = 0;
-
 static unsigned long lastSerial = 0;
 
+// =====================================================
+// INTERNAL SCHEDULER HELPER
+// =====================================================
+
+// Memeriksa apakah interval sudah terpenuhi.
+// Menggunakan unsigned subtraction agar aman terhadap
+// overflow millis().
+//
+// Jika proses terlambat, jadwal berikutnya dihitung
+// dari waktu eksekusi aktual. Tidak ada catch-up burst.
+
+static bool schedulerIsDue(
+    unsigned long &lastExecution,
+    unsigned long interval,
+    unsigned long currentTime
+) {
+    if (currentTime - lastExecution >= interval) {
+        lastExecution = currentTime;
+        return true;
+    }
+
+    return false;
+}
 
 // =====================================================
 // INITIALIZATION
@@ -33,170 +49,92 @@ void schedulerInit() {
     unsigned long now = millis();
 
     lastDHT = now;
-
     lastSoil = now;
-
     lastRain = now;
-
     lastFlow = now;
-
     lastWaterLevel = now;
 
     lastRTC = now;
-
     lastLCD = now;
-
     lastSerial = now;
 }
 
-
 // =====================================================
-// DHT SCHEDULER
+// SENSOR SCHEDULER
 // =====================================================
 
 bool schedulerDHT() {
 
-    unsigned long now = millis();
-
-    if (now - lastDHT >= DHT_INTERVAL_MS) {
-
-        lastDHT = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastDHT,
+        DHT_INTERVAL_MS,
+        millis()
+    );
 }
-
-
-// =====================================================
-// SOIL SCHEDULER
-// =====================================================
 
 bool schedulerSoil() {
 
-    unsigned long now = millis();
-
-    if (now - lastSoil >= SOIL_INTERVAL_MS) {
-
-        lastSoil = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastSoil,
+        SOIL_INTERVAL_MS,
+        millis()
+    );
 }
-
-
-// =====================================================
-// RAIN SCHEDULER
-// =====================================================
 
 bool schedulerRain() {
 
-    unsigned long now = millis();
-
-    if (now - lastRain >= RAIN_INTERVAL_MS) {
-
-        lastRain = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastRain,
+        RAIN_INTERVAL_MS,
+        millis()
+    );
 }
-
-
-// =====================================================
-// FLOW SCHEDULER
-// =====================================================
 
 bool schedulerFlow() {
 
-    unsigned long now = millis();
-
-    if (now - lastFlow >= FLOW_INTERVAL_MS) {
-
-        lastFlow = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastFlow,
+        FLOW_INTERVAL_MS,
+        millis()
+    );
 }
-
-
-// =====================================================
-// WATER LEVEL / JSN SCHEDULER
-// =====================================================
 
 bool schedulerWaterLevel() {
 
-    unsigned long now = millis();
-
-    if (now - lastWaterLevel >= WATER_LEVEL_INTERVAL_MS) {
-
-        lastWaterLevel = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastWaterLevel,
+        WATER_LEVEL_INTERVAL_MS,
+        millis()
+    );
 }
 
-
 // =====================================================
-// RTC SCHEDULER
+// SYSTEM SCHEDULER
 // =====================================================
 
 bool schedulerRTC() {
 
-    unsigned long now = millis();
-
-    if (now - lastRTC >= RTC_INTERVAL_MS) {
-
-        lastRTC = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastRTC,
+        RTC_INTERVAL_MS,
+        millis()
+    );
 }
-
-
-// =====================================================
-// LCD SCHEDULER
-// =====================================================
 
 bool schedulerLCD() {
 
-    unsigned long now = millis();
-
-    if (now - lastLCD >= LCD_INTERVAL_MS) {
-
-        lastLCD = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastLCD,
+        LCD_INTERVAL_MS,
+        millis()
+    );
 }
-
-
-// =====================================================
-// SERIAL MONITOR SCHEDULER
-// =====================================================
 
 bool schedulerSerial() {
 
-    unsigned long now = millis();
-
-    if (now - lastSerial >= SERIAL_INTERVAL_MS) {
-
-        lastSerial = now;
-
-        return true;
-    }
-
-    return false;
+    return schedulerIsDue(
+        lastSerial,
+        SERIAL_INTERVAL_MS,
+        millis()
+    );
 }
