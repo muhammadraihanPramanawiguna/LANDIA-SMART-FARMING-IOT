@@ -10,10 +10,10 @@
 // ============================================================
 
 struct OfflineRecord {
-  String recordId;
-  String topic;
-  String payload;
-  bool isEvent;
+    String recordId;
+    String topic;
+    String payload;
+    bool isEvent;
 };
 
 // ============================================================
@@ -25,33 +25,44 @@ bool offlineStorageBegin();
 bool offlineStorageIsReady();
 
 // ============================================================
+// RECORD ID
+// ============================================================
+
+// Membuat ID unik untuk satu record.
+bool offlineStorageGenerateRecordId(
+    char* buffer,
+    size_t bufferSize
+);
+
+// ============================================================
 // ENQUEUE
 // ============================================================
 
-// Menyimpan record ke antrean LittleFS.
-// Record ID akan dibuat dan disimpan oleh implementasi storage.
-
+// Menyimpan record dengan ID yang sudah dibuat pemanggil.
+// recordId harus sama dengan recordId di payload JSON.
 bool offlineStorageEnqueue(
-  const char* topic,
-  const char* payload,
-  bool isEvent
+    const char* recordId,
+    const char* topic,
+    const char* payload,
+    bool isEvent
+);
+
+// API lama dipertahankan untuk kompatibilitas.
+bool offlineStorageEnqueue(
+    const char* topic,
+    const char* payload,
+    bool isEvent
 );
 
 // ============================================================
 // QUEUE ACCESS
 // ============================================================
 
-// Membaca record terdepan.
-// Event diprioritaskan dibanding telemetry.
-
 bool offlineStoragePeek(OfflineRecord& record);
 
 // ============================================================
 // ACKNOWLEDGED RECORD REMOVAL
 // ============================================================
-
-// Menghapus record berdasarkan ID yang telah dikonfirmasi backend.
-// Jangan dipanggil hanya karena MQTT publish berhasil.
 
 bool offlineStorageRemove(const char* recordId);
 

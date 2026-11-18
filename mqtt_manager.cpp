@@ -4,50 +4,68 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <ArduinoJson.h>
 
 #include <stdio.h>
+#include <string.h>
+#include <math.h>
 
 #include "offline_storage.h"
+#include "secrets.h"
 
 // ============================================================
 // LANDIA FARM - MQTT MANAGER
 //
-// Kontrol irigasi tidak ditempatkan di file ini.
-// MQTT hanya menangani komunikasi dan antrean data.
+// Alur telemetry:
+// Sensor -> LittleFS -> MQTT -> Backend -> Application ACK
+//
+// Kontrol irigasi lokal tetap berjalan di ESP32.
+// Koneksi Wi-Fi, MQTT, dan ACK tidak boleh menjadi syarat
+// untuk menjalankan kontrol irigasi lokal.
 // ============================================================
 
-const char* WIFI_SSID = "AYU";
-const char* WIFI_PASSWORD = "ayu241283";
+// ============================================================
+// MQTT BROKER
+// ============================================================
 
+// Pertahankan alamat broker dari konfigurasi kamu.
+// Pastikan alamat ini memang dapat dijangkau ESP32.
 const char* MQTT_SERVER = "192.168.0.190";
 const uint16_t MQTT_PORT = 1883;
 
 const char* MQTT_CLIENT_ID = "landia-esp32-01";
-
-// Topic yang sudah digunakan Landia Farm.
-const char* TOPIC_DHT =
-  "landia/sensor/dht";
-
-const char* TOPIC_SOIL =
-  "landia/sensor/soil";
-
-const char* TOPIC_WATER_LEVEL =
-  "landia/sensor/water-level";
-
-const char* TOPIC_RAIN =
-  "landia/sensor/rain";
-
-const char* TOPIC_FLOW =
-  "landia/sensor/flow";
-
-const char* TOPIC_IRRIGATION =
-  "landia/actuator/irrigation";
-
-const char* TOPIC_IRRIGATION_EVENT =
-  "landia/irrigation/event";
+const char* DEVICE_ID = "landia-esp32-01";
 
 // ============================================================
-// MQTT OBJECTS
+// MQTT TOPICS
+// ============================================================
+
+const char* TOPIC_DHT =
+    "landia/sensor/dht";
+
+const char* TOPIC_SOIL =
+    "landia/sensor/soil";
+
+const char* TOPIC_WATER_LEVEL =
+    "landia/sensor/water-level";
+
+const char* TOPIC_RAIN =
+    "landia/sensor/rain";
+
+const char* TOPIC_FLOW =
+    "landia/sensor/flow";
+
+const char* TOPIC_IRRIGATION =
+    "landia/actuator/irrigation";
+
+const char* TOPIC_IRRIGATION_EVENT =
+    "landia/irrigation/event";
+
+const char* TOPIC_ACK =
+    "landia/ack/landia-esp32-01";
+
+// ============================================================
+// MQTT OBJECTS AND INTERNAL STATE
 // ============================================================
 
 namespace {
@@ -55,510 +73,1000 @@ namespace {
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
+// ------------------------------------------------------------
+// TIMING
+// ------------------------------------------------------------
+
 const unsigned long WIFI_RECONNECT_INTERVAL = 10000UL;
 const unsigned long MQTT_RECONNECT_INTERVAL = 10000UL;
 
-const unsigned long OFFLINE_TELEMETRY_INTERVAL =
-  300000UL;  // 5 menit
-
-const unsigned long BACKLOG_SEND_INTERVAL =
-  500UL;
+const unsigned long OFFLINE_TELEMETRY_INTERVAL = 300000UL;
+const unsigned long BACKLOG_SEND_INTERVAL = 500UL;
+const unsigned long ACK_TIMEOUT_INTERVAL = 10000UL;
 
 unsigned long lastWiFiAttempt = 0;
 unsigned long lastMQTTAttempt = 0;
 unsigned long lastOfflineTelemetryStore = 0;
 unsigned long lastBacklogSend = 0;
+unsigned long lastRecordPublish = 0;
 
 bool storageReady = false;
 
+// Satu record dikirim dan menunggu application ACK.
+String inFlightRecordId;
+String inFlightSensorType;
+
 // ------------------------------------------------------------
-// DECLARATIONS
+// TIMESTAMP
 // ------------------------------------------------------------
 
-void mqttEnsureWiFi();
-void mqttConnect();
+String getBackendTimestamp() {
 
-bool mqttPublishJson(
-  const char* topic,
-  const char* payload,
-  bool isEvent
-);
+    String timestamp = rtcGetTimestamp();
 
-void queueTelemetrySet(
-  const DHTData& dht,
-  const SoilData& soil,
-  const RainData& rain,
-  const FlowData& flow,
-  const WaterLevelData& waterLevel
-);
+    if (timestamp.length() == 0 ||
+        timestamp == "INVALID") {
+        return "";
+    }
 
-bool publishOneBacklogRecord();
+    // Backend menggunakan LocalDateTime:
+    // yyyy-MM-ddTHH:mm:ss
+    timestamp.replace(' ', 'T');
 
-// ============================================================
-// GENERIC PUBLISH
-// ============================================================
+    return timestamp;
+}
 
-bool mqttPublishJson(
-  const char* topic,
-  const char* payload,
-  bool isEvent
+// ------------------------------------------------------------
+// SENSOR TYPE FROM MQTT TOPIC
+// ------------------------------------------------------------
+
+const char* getSensorTypeFromTopic(const char* topic) {
+
+    if (topic == nullptr) {
+        return "";
+    }
+
+    if (strcmp(topic, TOPIC_DHT) == 0) {
+        return "dht";
+    }
+
+    if (strcmp(topic, TOPIC_SOIL) == 0) {
+        return "soil";
+    }
+
+    if (strcmp(topic, TOPIC_WATER_LEVEL) == 0) {
+        return "water-level";
+    }
+
+    if (strcmp(topic, TOPIC_RAIN) == 0) {
+        return "rain";
+    }
+
+    if (strcmp(topic, TOPIC_FLOW) == 0) {
+        return "flow";
+    }
+
+    return "";
+}
+
+// ------------------------------------------------------------
+// GENERATE RECORD ID
+// ------------------------------------------------------------
+
+bool generateRecordId(char* buffer, size_t size) {
+
+    if (buffer == nullptr || size == 0) {
+        return false;
+    }
+
+    return offlineStorageGenerateRecordId(buffer, size);
+}
+
+// ------------------------------------------------------------
+// STORE SENSOR PAYLOAD
+// ------------------------------------------------------------
+
+bool enqueueSensorPayload(
+    const char* topic,
+    const char* payload,
+    const char* recordId
 ) {
-  if (topic == nullptr || payload == nullptr) {
-    return false;
-  }
 
-  if (mqttClient.connected()) {
-    if (mqttClient.publish(topic, payload, false)) {
-      return true;
+    if (!storageReady ||
+        topic == nullptr ||
+        payload == nullptr ||
+        recordId == nullptr) {
+        return false;
+    }
+
+    bool saved = offlineStorageEnqueue(
+        recordId,
+        topic,
+        payload,
+        false
+    );
+
+    if (!saved) {
+        Serial.printf(
+            "[OFFLINE] Gagal menyimpan record: %s\n",
+            topic
+        );
+
+        return false;
     }
 
     Serial.printf(
-      "[MQTT] Publish gagal: %s\n",
-      topic
-    );
-  }
-
-  if (!storageReady) {
-    Serial.println(
-      "[OFFLINE] Penyimpanan tidak tersedia; pesan gagal diantrikan."
+        "[OFFLINE] Record tersimpan: %s | %s\n",
+        getSensorTypeFromTopic(topic),
+        recordId
     );
 
-    return false;
-  }
-
-  bool queued = offlineStorageEnqueue(
-    topic,
-    payload,
-    isEvent
-  );
-
-  if (!queued) {
-    Serial.printf(
-      "[OFFLINE] Pesan gagal disimpan: %s\n",
-      topic
-    );
-  }
-
-  return queued;
+    return true;
 }
 
-// ============================================================
-// STORE TELEMETRY SET
-// ============================================================
+// ------------------------------------------------------------
+// CREATE AND STORE ONE SENSOR RECORD
+// ------------------------------------------------------------
 
-
-void queueTelemetrySet(
-  const DHTData& dht,
-  const SoilData& soil,
-  const RainData& rain,
-  const FlowData& flow,
-  const WaterLevelData& waterLevel
+bool queueTelemetrySet(
+    const DHTData& dht,
+    const SoilData& soil,
+    const RainData& rain,
+    const FlowData& flow,
+    const WaterLevelData& waterLevel
 ) {
-  char payload[256];
 
-  // 1. DHT11
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-dht-01\","
-    "\"temperature\":%.2f,"
-    "\"humidity\":%.2f}",
-    dht.temperature,
-    dht.humidity
-  );
-  offlineStorageEnqueue(TOPIC_DHT, payload, false);
+    char recordId[41];
+    char payload[512];
 
-  // 2. Sensor kelembapan tanah
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-soil-01\","
-    "\"value\":%.2f,\"unit\":\"%%\"}",
-    soil.moisturePercent
-  );
-  offlineStorageEnqueue(TOPIC_SOIL, payload, false);
+    String timestamp = getBackendTimestamp();
 
-  // 3. Sensor hujan
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-rain-01\","
-    "\"value\":%.2f,\"unit\":\"%%\"}",
-    rain.rainPercent
-  );
-  offlineStorageEnqueue(TOPIC_RAIN, payload, false);
+    bool allSaved = true;
+    int length = 0;
 
-  // 4. Flow sensor
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-flow-01\","
-    "\"value\":%.3f,\"unit\":\"L/min\"}",
-    flow.flowRateLMin
-  );
-  offlineStorageEnqueue(TOPIC_FLOW, payload, false);
+    // ========================================================
+    // 1. DHT SENSOR
+    // ========================================================
 
-  // 5. Sensor level air
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-water-level-01\","
-    "\"value\":%.2f,\"unit\":\"%%\"}",
-    waterLevel.waterLevelPercent
-  );
-  offlineStorageEnqueue(TOPIC_WATER_LEVEL, payload, false);
+    if (dht.valid &&
+        isfinite(dht.temperature) &&
+        isfinite(dht.humidity)) {
+
+        if (!generateRecordId(recordId, sizeof(recordId))) {
+            allSaved = false;
+        } else {
+
+            if (timestamp.length() > 0) {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-dht-01\","
+                    "\"temperature\":%.2f,"
+                    "\"humidity\":%.2f,"
+                    "\"recordedAt\":\"%s\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    dht.temperature,
+                    dht.humidity,
+                    timestamp.c_str()
+                );
+
+            } else {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-dht-01\","
+                    "\"temperature\":%.2f,"
+                    "\"humidity\":%.2f"
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    dht.temperature,
+                    dht.humidity
+                );
+            }
+
+            if (length <= 0 ||
+                length >= (int)sizeof(payload) ||
+                !enqueueSensorPayload(
+                    TOPIC_DHT,
+                    payload,
+                    recordId
+                )) {
+                allSaved = false;
+            }
+        }
+
+    } else {
+        Serial.println("[SENSOR] DHT tidak valid, dilewati.");
+    }
+
+    // ========================================================
+    // 2. SOIL MOISTURE SENSOR
+    // ========================================================
+
+    if (soil.valid && isfinite(soil.moisturePercent)) {
+
+        if (!generateRecordId(recordId, sizeof(recordId))) {
+            allSaved = false;
+        } else {
+
+            length = snprintf(
+                payload,
+                sizeof(payload),
+                "{"
+                "\"recordId\":\"%s\","
+                "\"deviceId\":\"%s\","
+                "\"sensorId\":\"landia-soil-01\","
+                "\"value\":%.2f,"
+                "\"unit\":\"%%\""
+                "}",
+                recordId,
+                DEVICE_ID,
+                soil.moisturePercent
+            );
+
+            if (length <= 0 ||
+                length >= (int)sizeof(payload) ||
+                !enqueueSensorPayload(
+                    TOPIC_SOIL,
+                    payload,
+                    recordId
+                )) {
+                allSaved = false;
+            }
+        }
+
+    } else {
+        Serial.println("[SENSOR] Soil tidak valid, dilewati.");
+    }
+
+    // ========================================================
+    // 3. RAIN SENSOR
+    // ========================================================
+
+    if (rain.valid && isfinite(rain.rainPercent)) {
+
+        if (!generateRecordId(recordId, sizeof(recordId))) {
+            allSaved = false;
+        } else {
+
+            if (timestamp.length() > 0) {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-rain-01\","
+                    "\"value\":%.2f,"
+                    "\"unit\":\"%%\","
+                    "\"recordedAt\":\"%s\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    rain.rainPercent,
+                    timestamp.c_str()
+                );
+
+            } else {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-rain-01\","
+                    "\"value\":%.2f,"
+                    "\"unit\":\"%%\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    rain.rainPercent
+                );
+            }
+
+            if (length <= 0 ||
+                length >= (int)sizeof(payload) ||
+                !enqueueSensorPayload(
+                    TOPIC_RAIN,
+                    payload,
+                    recordId
+                )) {
+                allSaved = false;
+            }
+        }
+
+    } else {
+        Serial.println("[SENSOR] Rain tidak valid, dilewati.");
+    }
+
+    // ========================================================
+    // 4. FLOW SENSOR
+    // ========================================================
+
+    if (flow.valid && isfinite(flow.flowRateLMin)) {
+
+        if (!generateRecordId(recordId, sizeof(recordId))) {
+            allSaved = false;
+        } else {
+
+            if (timestamp.length() > 0) {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-flow-01\","
+                    "\"value\":%.3f,"
+                    "\"unit\":\"L/min\","
+                    "\"recordedAt\":\"%s\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    flow.flowRateLMin,
+                    timestamp.c_str()
+                );
+
+            } else {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-flow-01\","
+                    "\"value\":%.3f,"
+                    "\"unit\":\"L/min\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    flow.flowRateLMin
+                );
+            }
+
+            if (length <= 0 ||
+                length >= (int)sizeof(payload) ||
+                !enqueueSensorPayload(
+                    TOPIC_FLOW,
+                    payload,
+                    recordId
+                )) {
+                allSaved = false;
+            }
+        }
+
+    } else {
+        Serial.println("[SENSOR] Flow tidak valid, dilewati.");
+    }
+
+    // ========================================================
+    // 5. WATER LEVEL SENSOR
+    // ========================================================
+
+    if (waterLevel.valid &&
+        isfinite(waterLevel.waterLevelPercent)) {
+
+        if (!generateRecordId(recordId, sizeof(recordId))) {
+            allSaved = false;
+        } else {
+
+            if (timestamp.length() > 0) {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-water-level-01\","
+                    "\"value\":%.2f,"
+                    "\"unit\":\"%%\","
+                    "\"recordedAt\":\"%s\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    waterLevel.waterLevelPercent,
+                    timestamp.c_str()
+                );
+
+            } else {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-water-level-01\","
+                    "\"value\":%.2f,"
+                    "\"unit\":\"%%\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    waterLevel.waterLevelPercent
+                );
+            }
+
+            if (length <= 0 ||
+                length >= (int)sizeof(payload) ||
+                !enqueueSensorPayload(
+                    TOPIC_WATER_LEVEL,
+                    payload,
+                    recordId
+                )) {
+                allSaved = false;
+            }
+        }
+
+    } else {
+        Serial.println("[SENSOR] Water level tidak valid, dilewati.");
+    }
+
+    if (allSaved) {
+        Serial.println(
+            "[OFFLINE] Seluruh telemetry valid berhasil diproses."
+        );
+    } else {
+        Serial.println(
+            "[OFFLINE] Ada telemetry yang gagal disimpan."
+        );
+    }
+
+    return allSaved;
 }
 
-// ============================================================
+// ------------------------------------------------------------
+// APPLICATION ACK CALLBACK
+// ------------------------------------------------------------
+
+void mqttCallback(
+    char* topic,
+    byte* payload,
+    unsigned int length
+) {
+
+    if (topic == nullptr ||
+        payload == nullptr ||
+        strcmp(topic, TOPIC_ACK) != 0) {
+        return;
+    }
+
+    // ArduinoJson 7
+    JsonDocument document;
+
+    DeserializationError error = deserializeJson(
+        document,
+        payload,
+        length
+    );
+
+    if (error) {
+        Serial.printf(
+            "[ACK] JSON tidak valid: %s\n",
+            error.c_str()
+        );
+
+        return;
+    }
+
+    const char* recordId =
+        document["recordId"] | "";
+
+    const char* deviceId =
+        document["deviceId"] | "";
+
+    const char* sensorType =
+        document["sensorType"] | "";
+
+    const char* status =
+        document["status"] | "";
+
+    if (recordId[0] == '\0' ||
+        deviceId[0] == '\0' ||
+        sensorType[0] == '\0' ||
+        status[0] == '\0') {
+
+        Serial.println("[ACK] Field ACK tidak lengkap.");
+        return;
+    }
+
+    // Pastikan ACK berasal untuk device ini.
+    if (strcmp(deviceId, DEVICE_ID) != 0) {
+        Serial.println("[ACK] Device ID tidak cocok.");
+        return;
+    }
+
+    // Hanya status stored yang mengizinkan penghapusan.
+    if (strcmp(status, "stored") != 0) {
+        Serial.printf(
+            "[ACK] Status bukan stored: %s\n",
+            status
+        );
+
+        return;
+    }
+
+    // Harus ada record yang sedang menunggu ACK.
+    if (inFlightRecordId.length() == 0) {
+        Serial.println("[ACK] Tidak ada record yang menunggu ACK.");
+        return;
+    }
+
+    // Record ID wajib sama.
+    if (inFlightRecordId != recordId) {
+        Serial.printf(
+            "[ACK] Record ID tidak cocok. Diterima: %s\n",
+            recordId
+        );
+
+        return;
+    }
+
+    // Sensor type wajib sesuai dengan topic record aktif.
+    if (inFlightSensorType != sensorType) {
+        Serial.printf(
+            "[ACK] Sensor type tidak cocok. Diharapkan: %s, diterima: %s\n",
+            inFlightSensorType.c_str(),
+            sensorType
+        );
+
+        return;
+    }
+
+    // Hapus hanya setelah seluruh validasi ACK berhasil.
+    if (!offlineStorageRemove(recordId)) {
+        Serial.printf(
+            "[ACK] Gagal menghapus record: %s\n",
+            recordId
+        );
+
+        return;
+    }
+
+    Serial.printf(
+        "[ACK] Backend confirmed: %s | %s\n",
+        recordId,
+        sensorType
+    );
+
+    inFlightRecordId = "";
+    inFlightSensorType = "";
+
+    lastRecordPublish = 0;
+}
+
+// ------------------------------------------------------------
 // WIFI RECONNECT
-// ============================================================
+// ------------------------------------------------------------
 
 void mqttEnsureWiFi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
 
-  unsigned long now = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+        return;
+    }
 
-  if (now - lastWiFiAttempt <
-      WIFI_RECONNECT_INTERVAL) {
-    return;
-  }
+    unsigned long now = millis();
 
-  lastWiFiAttempt = now;
+    if (now - lastWiFiAttempt <
+        WIFI_RECONNECT_INTERVAL) {
+        return;
+    }
 
-  Serial.println(
-    "[MQTT] Wi-Fi terputus; mencoba reconnect."
-  );
+    lastWiFiAttempt = now;
 
-  // Jangan melakukan loop tunggu koneksi di sini.
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.println(
+        "[WIFI] Koneksi terputus. Mencoba reconnect..."
+    );
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
+    );
 }
 
-// ============================================================
-// MQTT RECONNECT
-// ============================================================
+// ------------------------------------------------------------
+// MQTT CONNECT
+// ------------------------------------------------------------
 
 void mqttConnect() {
-  if (WiFi.status() != WL_CONNECTED ||
-      mqttClient.connected()) {
-    return;
-  }
 
-  unsigned long now = millis();
+    if (WiFi.status() != WL_CONNECTED ||
+        mqttClient.connected()) {
+        return;
+    }
 
-  if (now - lastMQTTAttempt <
-      MQTT_RECONNECT_INTERVAL) {
-    return;
-  }
+    unsigned long now = millis();
 
-  lastMQTTAttempt = now;
+    if (now - lastMQTTAttempt <
+        MQTT_RECONNECT_INTERVAL) {
+        return;
+    }
 
-  Serial.println(
-    "[MQTT] Mencoba koneksi ke broker."
-  );
+    lastMQTTAttempt = now;
 
-  if (mqttClient.connect(MQTT_CLIENT_ID)) {
-    Serial.println(
-      "[MQTT] Berhasil terhubung."
-    );
+    Serial.println("[MQTT] Connecting to broker...");
 
-    mqttClient.publish(
-      TOPIC_IRRIGATION_EVENT,
-      "{\"event\":\"device_online\"}",
-      false
-    );
-  } else {
-    Serial.printf(
-      "[MQTT] Koneksi gagal. State=%d\n",
-      mqttClient.state()
-    );
-  }
+    if (mqttClient.connect(MQTT_CLIENT_ID)) {
+
+        Serial.println("[MQTT] Connected.");
+
+        if (mqttClient.subscribe(TOPIC_ACK, 1)) {
+
+            Serial.printf(
+                "[MQTT] Subscribed ACK: %s\n",
+                TOPIC_ACK
+            );
+
+        } else {
+
+            Serial.println(
+                "[MQTT] Gagal subscribe ACK."
+            );
+        }
+
+        // Setelah reconnect, record yang belum mendapat
+        // application ACK akan dikirim ulang.
+        inFlightRecordId = "";
+        inFlightSensorType = "";
+
+        lastRecordPublish = 0;
+        lastBacklogSend = 0;
+
+        mqttClient.publish(
+            TOPIC_IRRIGATION_EVENT,
+            "{\"event\":\"device_online\",\"deviceId\":\"landia-esp32-01\"}",
+            false
+        );
+
+    } else {
+
+        Serial.printf(
+            "[MQTT] Connection failed. State=%d\n",
+            mqttClient.state()
+        );
+    }
 }
 
-// ============================================================
+// ------------------------------------------------------------
 // SEND BACKLOG
-// Event diprioritaskan oleh offlineStoragePeek().
-// ============================================================
+// ------------------------------------------------------------
 
 bool publishOneBacklogRecord() {
-  if (!mqttClient.connected() || !storageReady) {
-    return false;
-  }
 
-  OfflineRecord record;
+    if (!mqttClient.connected() ||
+        !storageReady) {
+        return false;
+    }
 
-  if (!offlineStoragePeek(record)) {
-    return false;
-  }
+    unsigned long now = millis();
 
-  if (!mqttClient.publish(
-        record.topic.c_str(),
-        record.payload.c_str(),
-        false)) {
+    // Jika masih menunggu ACK, jangan kirim record lain.
+    if (inFlightRecordId.length() > 0) {
+
+        if (now - lastRecordPublish <
+            ACK_TIMEOUT_INTERVAL) {
+            return false;
+        }
+
+        Serial.printf(
+            "[MQTT] ACK timeout. Record akan dicoba ulang: %s\n",
+            inFlightRecordId.c_str()
+        );
+
+        // Record tidak dihapus dari LittleFS.
+        // Kosongkan status in-flight agar record yang sama
+        // dapat dikirim ulang.
+        inFlightRecordId = "";
+        inFlightSensorType = "";
+    }
+
+    if (now - lastBacklogSend <
+        BACKLOG_SEND_INTERVAL) {
+        return false;
+    }
+
+    OfflineRecord record;
+
+    if (!offlineStoragePeek(record)) {
+        return false;
+    }
+
+    // Queue ini hanya untuk telemetry sensor.
+    // Event irigasi tidak boleh menunggu ACK sensor.
+    if (record.isEvent) {
+        Serial.println(
+            "[MQTT] Record event ditemukan di antrean telemetry. "
+            "Perlu penanganan antrean event terpisah."
+        );
+
+        return false;
+    }
+
+    const char* sensorType =
+        getSensorTypeFromTopic(record.topic.c_str());
+
+    if (sensorType[0] == '\0') {
+        Serial.printf(
+            "[MQTT] Topic tidak dikenal: %s\n",
+            record.topic.c_str()
+        );
+
+        return false;
+    }
+
+    if (!mqttClient.publish(
+            record.topic.c_str(),
+            record.payload.c_str(),
+            false
+        )) {
+
+        Serial.printf(
+            "[MQTT] Publish gagal: %s\n",
+            record.topic.c_str()
+        );
+
+        return false;
+    }
+
+    // Publish MQTT berhasil bukan berarti database backend
+    // sudah menyimpan data.
+    // Record tetap di LittleFS sampai application ACK valid.
+    inFlightRecordId = record.recordId;
+    inFlightSensorType = sensorType;
+
+    lastRecordPublish = now;
+    lastBacklogSend = now;
+
     Serial.printf(
-      "[MQTT] Pengiriman backlog gagal: %s\n",
-      record.topic.c_str()
+        "[MQTT] Record terkirim. Menunggu ACK: %s | %s\n",
+        record.recordId.c_str(),
+        sensorType
     );
 
-    return false;
-  }
-
-  // PENTING:
-  // Publish QoS 0 bukan ACK dari database server.
-  // Penghapusan ini belum memberikan jaminan end-to-end.
-  if (!offlineStorageRemoveFirst(record.isEvent)) {
-    Serial.println(
-      "[OFFLINE] Gagal menghapus record setelah publish."
-    );
-
-    return false;
-  }
-
-  Serial.printf(
-    "[OFFLINE] Record dikirim: %s\n",
-    record.topic.c_str()
-  );
-
-  lastBacklogSend = millis();
-
-  return true;
+    return true;
 }
 
 } // namespace
 
 // ============================================================
-// INIT
+// MQTT INIT
 // ============================================================
 
 void mqttInit() {
-  Serial.println();
-  Serial.println("========== MQTT INIT ==========");
 
-  Serial.println(
-    "[DEBUG] Memanggil offlineStorageBegin()..."
-  );
+    Serial.println();
+    Serial.println("========== LANDIA MQTT INIT ==========");
 
-  storageReady = offlineStorageBegin();
+    storageReady = offlineStorageBegin();
 
-  Serial.printf(
-    "[DEBUG] storageReady = %s\n",
-    storageReady ? "true" : "false"
-  );
+    if (!storageReady) {
 
-  Serial.printf(
-    "[DEBUG] offlineStorageIsReady() = %s\n",
-    offlineStorageIsReady() ? "true" : "false"
-  );
+        Serial.println(
+            "[OFFLINE] LittleFS tidak tersedia. "
+            "Telemetry tidak dapat diantrekan."
+        );
+    } else {
 
-  if (!storageReady) {
-    Serial.println(
-      "[OFFLINE] PERINGATAN: buffer offline tidak tersedia."
+        Serial.println("[OFFLINE] LittleFS siap.");
+    }
+
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD
     );
-  }
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    mqttClient.setServer(
+        MQTT_SERVER,
+        MQTT_PORT
+    );
 
-  mqttClient.setServer(
-    MQTT_SERVER,
-    MQTT_PORT
-  );
+    mqttClient.setCallback(mqttCallback);
 
-  mqttClient.setSocketTimeout(2);
-  mqttClient.setKeepAlive(15);
-  mqttClient.setBufferSize(768);
+    mqttClient.setSocketTimeout(2);
+    mqttClient.setKeepAlive(15);
+    mqttClient.setBufferSize(768);
 
-  Serial.println(
-    "[MQTT] Wi-Fi connection started."
-  );
-
-  Serial.println(
-    "[MQTT] Manager ready."
-  );
+    Serial.println("[MQTT] Manager initialized.");
 }
 
 // ============================================================
-// STATUS
+// CONNECTION STATUS
 // ============================================================
 
 bool wifiIsConnected() {
-  return WiFi.status() == WL_CONNECTED;
+    return WiFi.status() == WL_CONNECTED;
 }
 
 bool mqttIsConnected() {
-  return mqttClient.connected();
+    return mqttClient.connected();
 }
 
 // ============================================================
-// UPDATE
+// MQTT UPDATE
 // ============================================================
 
 void mqttUpdate() {
-  if (!wifiIsConnected()) {
-    mqttEnsureWiFi();
-    return;
-  }
 
-  if (!mqttClient.connected()) {
-    mqttConnect();
-    return;
-  }
-
-  mqttClient.loop();
-
-  unsigned long now = millis();
-
-  if (now - lastBacklogSend >=
-      BACKLOG_SEND_INTERVAL) {
-    publishOneBacklogRecord();
-  }
-}
-
-// ============================================================
-// TELEMETRY
-// ============================================================
-
-
-void mqttPublishTelemetry(
-  const DHTData& dht,
-  const SoilData& soil,
-  const RainData& rain,
-  const FlowData& flow,
-  const WaterLevelData& waterLevel,
-  const RTCData& rtc
-) {
-  // Timestamp RTC belum dimasukkan ke payload.
-  (void)rtc;
-
-  // Jika MQTT terputus, simpan seluruh telemetry ke antrean.
-  if (!mqttClient.connected()) {
-    if (!storageReady) {
-      Serial.println(
-        "[OFFLINE] Telemetry tidak disimpan: "
-        "penyimpanan offline tidak tersedia."
-      );
-      return;
+    if (!wifiIsConnected()) {
+        mqttEnsureWiFi();
+        return;
     }
+
+    if (!mqttClient.connected()) {
+        mqttConnect();
+        return;
+    }
+
+    // Memproses pesan masuk, termasuk application ACK.
+    mqttClient.loop();
 
     unsigned long now = millis();
 
-    if (
-      lastOfflineTelemetryStore != 0 &&
-      now - lastOfflineTelemetryStore <
-        OFFLINE_TELEMETRY_INTERVAL
-    ) {
-      return;
+    if (now - lastBacklogSend >=
+        BACKLOG_SEND_INTERVAL) {
+
+        publishOneBacklogRecord();
     }
-
-    lastOfflineTelemetryStore = now;
-
-    queueTelemetrySet(
-      dht,
-      soil,
-      rain,
-      flow,
-      waterLevel
-    );
-
-    Serial.printf(
-      "[OFFLINE] Events=%u, telemetry=%u\n",
-      (unsigned int)offlineStorageEventCount(),
-      (unsigned int)offlineStorageTelemetryCount()
-    );
-
-    return;
-  }
-
-  char payload[256];
-
-  // 1. DHT11
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-dht-01\","
-    "\"temperature\":%.2f,"
-    "\"humidity\":%.2f}",
-    dht.temperature,
-    dht.humidity
-  );
-  mqttPublishJson(TOPIC_DHT, payload, false);
-
-  // 2. Sensor kelembapan tanah
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-soil-01\","
-    "\"value\":%.2f,\"unit\":\"%%\"}",
-    soil.moisturePercent
-  );
-  mqttPublishJson(TOPIC_SOIL, payload, false);
-
-  // 3. Sensor hujan
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-rain-01\","
-    "\"value\":%.2f,\"unit\":\"%%\"}",
-    rain.rainPercent
-  );
-  mqttPublishJson(TOPIC_RAIN, payload, false);
-
-  // 4. Flow sensor
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-flow-01\","
-    "\"value\":%.3f,\"unit\":\"L/min\"}",
-    flow.flowRateLMin
-  );
-  mqttPublishJson(TOPIC_FLOW, payload, false);
-
-  // 5. Sensor level air
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"sensorId\":\"landia-water-level-01\","
-    "\"value\":%.2f,\"unit\":\"%%\"}",
-    waterLevel.waterLevelPercent
-  );
-  mqttPublishJson(TOPIC_WATER_LEVEL, payload, false);
 }
 
+// ============================================================
+// PUBLISH TELEMETRY
+// ============================================================
+
+void mqttPublishTelemetry(
+    const DHTData& dht,
+    const SoilData& soil,
+    const RainData& rain,
+    const FlowData& flow,
+    const WaterLevelData& waterLevel,
+    const RTCData& rtc
+) {
+
+    (void)rtc;
+
+    if (!storageReady) {
+
+        Serial.println(
+            "[OFFLINE] Telemetry dilewati: storage unavailable."
+        );
+
+        return;
+    }
+
+    // Ketika broker offline, simpan satu set telemetry
+    // setiap lima menit agar LittleFS tidak cepat penuh.
+    if (!mqttClient.connected()) {
+
+        unsigned long now = millis();
+
+        if (lastOfflineTelemetryStore != 0 &&
+            now - lastOfflineTelemetryStore <
+                OFFLINE_TELEMETRY_INTERVAL) {
+            return;
+        }
+
+        lastOfflineTelemetryStore = now;
+    }
+
+    // Semua data valid disimpan ke LittleFS terlebih dahulu.
+    // Pengiriman dilakukan terpisah oleh mqttUpdate().
+    queueTelemetrySet(
+        dht,
+        soil,
+        rain,
+        flow,
+        waterLevel
+    );
+}
 
 // ============================================================
 // IRRIGATION EVENT
 // ============================================================
 
 void mqttPublishIrrigationEvent(
-  const char* event,
-  const char* state,
-  const RTCData& rtc
+    const char* event,
+    const char* state,
+    const RTCData& rtc
 ) {
-  (void)rtc;
 
-  if (event == nullptr || state == nullptr) {
-    return;
-  }
+    (void)rtc;
 
-  char payload[256];
+    if (event == nullptr ||
+        state == nullptr) {
+        return;
+    }
 
-  String timestamp = rtcGetTimestamp();
+    if (!mqttClient.connected()) {
 
-  snprintf(
-    payload,
-    sizeof(payload),
-    "{\"event\":\"%s\",\"state\":\"%s\","
-    "\"timestamp\":\"%s\"}",
-    event,
-    state,
-    timestamp.c_str()
-  );
+        Serial.println(
+            "[MQTT] Irrigation event tidak terkirim: broker offline."
+        );
 
-  mqttPublishJson(
-    TOPIC_IRRIGATION_EVENT,
-    payload,
-    true
-  );
+        return;
+    }
+
+    char payload[256];
+
+    String timestamp = getBackendTimestamp();
+
+    int length;
+
+    if (timestamp.length() > 0) {
+
+        length = snprintf(
+            payload,
+            sizeof(payload),
+            "{"
+            "\"event\":\"%s\","
+            "\"state\":\"%s\","
+            "\"deviceId\":\"%s\","
+            "\"timestamp\":\"%s\""
+            "}",
+            event,
+            state,
+            DEVICE_ID,
+            timestamp.c_str()
+        );
+
+    } else {
+
+        length = snprintf(
+            payload,
+            sizeof(payload),
+            "{"
+            "\"event\":\"%s\","
+            "\"state\":\"%s\","
+            "\"deviceId\":\"%s\""
+            "}",
+            event,
+            state,
+            DEVICE_ID
+        );
+    }
+
+    if (length <= 0 ||
+        length >= (int)sizeof(payload)) {
+        Serial.println(
+            "[MQTT] Gagal membuat payload irrigation event."
+        );
+
+        return;
+    }
+
+    if (!mqttClient.publish(
+            TOPIC_IRRIGATION_EVENT,
+            payload,
+            false
+        )) {
+
+        Serial.println(
+            "[MQTT] Gagal publish irrigation event."
+        );
+
+        return;
+    }
+
+    Serial.printf(
+        "[MQTT] Irrigation event terkirim: %s | %s\n",
+        event,
+        state
+    );
 }

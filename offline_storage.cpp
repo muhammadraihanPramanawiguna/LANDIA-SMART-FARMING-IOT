@@ -194,206 +194,121 @@ String makeRecord(const OfflineRecord& record) {
         record.payload
     );
 
-    char checksumText[9];
+    char checksumBuffer[9];
 
     snprintf(
-        checksumText,
-        sizeof(checksumText),
+        checksumBuffer,
+        sizeof(checksumBuffer),
         "%08lX",
         (unsigned long)checksum
     );
 
-    String line;
+    String serialized;
 
-    line.reserve(
+    serialized.reserve(
         record.recordId.length() +
         record.topic.length() +
         record.payload.length() +
-        16
+        32
     );
 
-    line += record.isEvent ? "E\t" : "T\t";
-    line += record.recordId;
-    line += '\t';
-    line += record.topic;
-    line += '\t';
-    line += record.payload;
-    line += '\t';
-    line += checksumText;
-    line += '\n';
+    serialized += record.isEvent ? "E\t" : "T\t";
+    serialized += record.recordId;
+    serialized += '\t';
+    serialized += record.topic;
+    serialized += '\t';
+    serialized += record.payload;
+    serialized += '\t';
+    serialized += checksumBuffer;
+    serialized += '\n';
 
-    return line;
+    return serialized;
 }
 
 // ------------------------------------------------------------
-// LINE READER
-//
-// Membedakan:
-// - Baris lengkap dengan newline.
-// - Baris terakhir tanpa newline.
-// - Baris terlalu panjang.
+// LEGACY RECORD PARSER
 // ------------------------------------------------------------
 
-LineResult readLine(
-    File& file,
-    String& line
+bool parseLegacyRecord(
+    const String& line,
+    bool isEvent,
+    OfflineRecord& record
 ) {
-    line = "";
+    int first = line.indexOf('\t');
+    int second = line.indexOf('\t', first + 1);
+    int third = line.indexOf('\t', second + 1);
 
-    bool receivedCharacter = false;
-    bool tooLong = false;
-
-    while (file.available()) {
-        int value = file.read();
-
-        if (value < 0) {
-            break;
-        }
-
-        receivedCharacter = true;
-
-        if (value == '\n') {
-            if (tooLong) {
-                return LineResult::TOO_LONG;
-            }
-
-            if (line.endsWith("\r")) {
-                line.remove(line.length() - 1);
-            }
-
-            return LineResult::COMPLETE;
-        }
-
-        if (line.length() < MAX_LINE_LENGTH) {
-            line += (char)value;
-        } else {
-            tooLong = true;
-        }
+    if (first < 0 || second < 0 || third < 0) {
+        return false;
     }
 
-    if (!receivedCharacter) {
-        return LineResult::NONE;
-    }
+    record.recordId = line.substring(0, first);
+    record.topic = line.substring(first + 1, second);
+    record.payload = line.substring(second + 1, third);
+    record.isEvent = isEvent;
 
-    if (tooLong) {
-        return LineResult::TOO_LONG;
-    }
-
-    if (line.endsWith("\r")) {
-        line.remove(line.length() - 1);
-    }
-
-    return LineResult::UNTERMINATED;
+    return isValidRecord(record);
 }
 
 // ------------------------------------------------------------
 // RECORD PARSER
-//
-// Supports:
-// Legacy:
-// E<TAB>topic<TAB>payload
-//
-// V3:
-// E<TAB>ID<TAB>topic<TAB>payload<TAB>checksum
 // ------------------------------------------------------------
 
 bool parseRecord(
     const String& line,
     bool expectedEvent,
     OfflineRecord& record,
-    bool& isLegacy
+    bool& legacy
 ) {
-    isLegacy = false;
+    legacy = false;
 
-    if (line.length() < 5 ||
-        line[0] != (expectedEvent ? 'E' : 'T') ||
+    if (line.length() == 0 ||
+        line.length() > MAX_LINE_LENGTH) {
+        return false;
+    }
+
+    // V3 record harus diawali E atau T.
+    if (line[0] != 'E' &&
+        line[0] != 'T') {
+
+        legacy = true;
+
+        return parseLegacyRecord(
+            line,
+            expectedEvent,
+            record
+        );
+    }
+
+    bool isEvent = line[0] == 'E';
+
+    if (isEvent != expectedEvent ||
+        line.length() < 3 ||
         line[1] != '\t') {
         return false;
     }
 
-    int firstTab = 1;
+    int first = line.indexOf('\t', 2);
+    int second = line.indexOf('\t', first + 1);
+    int third = line.indexOf('\t', second + 1);
 
-    int secondTab = line.indexOf('\t', firstTab + 1);
-
-    if (secondTab < 0) {
+    if (first < 0 || second < 0 || third < 0) {
         return false;
     }
 
-    int thirdTab = line.indexOf('\t', secondTab + 1);
+    record.recordId = line.substring(2, first);
+    record.topic = line.substring(first + 1, second);
+    record.payload = line.substring(second + 1, third);
+    record.isEvent = isEvent;
 
-    // Legacy format memiliki tepat dua tab.
-    if (thirdTab < 0) {
-        isLegacy = true;
+    String checksumText = line.substring(third + 1);
 
-        record.isEvent = expectedEvent;
-
-        record.topic = line.substring(
-            firstTab + 1,
-            secondTab
-        );
-
-        record.payload = line.substring(
-            secondTab + 1
-        );
-
-        if (record.topic.length() == 0 ||
-            record.topic.length() > MAX_TOPIC_LENGTH ||
-            record.payload.length() == 0 ||
-            record.payload.length() > MAX_PAYLOAD_LENGTH ||
-            containsInvalidCharacter(record.topic.c_str()) ||
-            containsInvalidCharacter(record.payload.c_str())) {
-            return false;
-        }
-
-        return generateRecordId(record.recordId);
-    }
-
-    int fourthTab = line.indexOf('\t', thirdTab + 1);
-
-    if (fourthTab < 0) {
+    if (checksumText.length() != 8) {
         return false;
     }
 
-    // Tidak boleh ada tab tambahan setelah checksum.
-    if (line.indexOf('\t', fourthTab + 1) >= 0) {
+    if (!isValidRecord(record)) {
         return false;
-    }
-
-    record.isEvent = expectedEvent;
-
-    record.recordId = line.substring(
-        firstTab + 1,
-        secondTab
-    );
-
-    record.topic = line.substring(
-        secondTab + 1,
-        thirdTab
-    );
-
-    record.payload = line.substring(
-        thirdTab + 1,
-        fourthTab
-    );
-
-    String checksumText = line.substring(fourthTab + 1);
-
-    if (!isValidRecord(record) ||
-        checksumText.length() != 8) {
-        return false;
-    }
-
-    for (size_t i = 0; i < checksumText.length(); ++i) {
-        char c = checksumText[i];
-
-        bool validHex =
-            (c >= '0' && c <= '9') ||
-            (c >= 'A' && c <= 'F') ||
-            (c >= 'a' && c <= 'f');
-
-        if (!validHex) {
-            return false;
-        }
     }
 
     char* endPointer = nullptr;
@@ -409,14 +324,53 @@ bool parseRecord(
         return false;
     }
 
-    uint32_t actualChecksum = calculateChecksum(
+    uint32_t calculatedChecksum = calculateChecksum(
         record.isEvent,
         record.recordId,
         record.topic,
         record.payload
     );
 
-    return actualChecksum == (uint32_t)storedChecksum;
+    return calculatedChecksum ==
+           (uint32_t)storedChecksum;
+}
+
+// ------------------------------------------------------------
+// LINE READER
+// ------------------------------------------------------------
+
+LineResult readLine(File& file, String& line) {
+    line = "";
+
+    bool foundData = false;
+
+    while (file.available()) {
+        int value = file.read();
+
+        if (value < 0) {
+            break;
+        }
+
+        foundData = true;
+
+        if (value == '\n') {
+            return LineResult::COMPLETE;
+        }
+
+        if (line.length() >= MAX_LINE_LENGTH) {
+            return LineResult::TOO_LONG;
+        }
+
+        if (value != '\r') {
+            line += (char)value;
+        }
+    }
+
+    if (!foundData) {
+        return LineResult::NONE;
+    }
+
+    return LineResult::UNTERMINATED;
 }
 
 // ------------------------------------------------------------
@@ -431,7 +385,7 @@ bool appendRecord(
 
     if (!file) {
         Serial.println(
-            "[OFFLINE] ERROR: gagal membuka file untuk append."
+            "[OFFLINE] ERROR: gagal membuka file antrean."
         );
 
         return false;
@@ -454,7 +408,29 @@ bool appendRecord(
 }
 
 // ------------------------------------------------------------
-// QUEUE SEARCH
+// QUEUE SIZE
+// ------------------------------------------------------------
+
+size_t queueSize(const char* path) {
+    if (!LittleFS.exists(path)) {
+        return 0;
+    }
+
+    File file = LittleFS.open(path, "r");
+
+    if (!file) {
+        return 0;
+    }
+
+    size_t result = file.size();
+
+    file.close();
+
+    return result;
+}
+
+// ------------------------------------------------------------
+// FIND RECORD
 // ------------------------------------------------------------
 
 SearchResult findRecord(
@@ -504,7 +480,6 @@ SearchResult findRecord(
 
         if (record.recordId == targetId) {
             if (result == SearchResult::FOUND) {
-                // ID duplikat tidak boleh dihapus secara ambigu.
                 result = SearchResult::ERROR;
                 break;
             }
@@ -512,7 +487,6 @@ SearchResult findRecord(
             result = SearchResult::FOUND;
         }
 
-        // Baris tanpa newline hanya boleh berada di akhir file.
         if (lineResult == LineResult::UNTERMINATED) {
             break;
         }
@@ -525,9 +499,6 @@ SearchResult findRecord(
 
 // ------------------------------------------------------------
 // QUEUE COMPACTION
-//
-// Hanya dijalankan ketika ada ACK.
-// Record selain target dipertahankan.
 // ------------------------------------------------------------
 
 bool compactQueue(
@@ -613,20 +584,17 @@ bool compactQueue(
         return false;
     }
 
-    // Hapus backup lama jika ada.
     if (LittleFS.exists(backup) &&
         !LittleFS.remove(backup)) {
         LittleFS.remove(temp);
         return false;
     }
 
-    // Simpan file asli sebagai backup.
     if (!LittleFS.rename(path, backup)) {
         LittleFS.remove(temp);
         return false;
     }
 
-    // Aktifkan file hasil compaction.
     if (!LittleFS.rename(temp, path)) {
         LittleFS.rename(backup, path);
 
@@ -637,8 +605,6 @@ bool compactQueue(
         return false;
     }
 
-    // File utama sudah berhasil diganti.
-    // Kegagalan menghapus backup tidak membatalkan ACK.
     if (LittleFS.exists(backup) &&
         !LittleFS.remove(backup)) {
         Serial.println(
@@ -651,12 +617,6 @@ bool compactQueue(
 
 // ------------------------------------------------------------
 // QUEUE RECOVERY
-//
-// - Restore backup jika file utama hilang.
-// - Buang temporary file yang tidak aktif.
-// - Validasi checksum.
-// - Migrasi format legacy.
-// - Abaikan hanya tail yang tidak valid dan tidak lengkap.
 // ------------------------------------------------------------
 
 bool recoverQueueFiles(bool isEvent) {
@@ -664,8 +624,6 @@ bool recoverQueueFiles(bool isEvent) {
     const char* temp = tempPath(isEvent);
     const char* backup = backupPath(isEvent);
 
-    // Jika listrik mati setelah file utama dipindahkan,
-    // pulihkan backup.
     if (!LittleFS.exists(path) &&
         LittleFS.exists(backup)) {
 
@@ -678,7 +636,6 @@ bool recoverQueueFiles(bool isEvent) {
         }
     }
 
-    // Jika file utama tersedia, backup adalah file lama.
     if (LittleFS.exists(path) &&
         LittleFS.exists(backup)) {
 
@@ -712,7 +669,6 @@ bool recoverQueueFiles(bool isEvent) {
     bool needsRewrite = false;
     bool success = true;
 
-    // Validasi awal.
     String line;
 
     while (true) {
@@ -737,14 +693,10 @@ bool recoverQueueFiles(bool isEvent) {
                 legacy
             )) {
             if (lineResult == LineResult::UNTERMINATED) {
-                // Tail terakhir tidak lengkap/rusak.
-                // Record ini belum dianggap tersimpan.
                 needsRewrite = true;
                 break;
             }
 
-            // Record rusak di tengah antrean:
-            // jangan membuang data secara otomatis.
             success = false;
             break;
         }
@@ -769,7 +721,6 @@ bool recoverQueueFiles(bool isEvent) {
         return false;
     }
 
-    // Tidak perlu rewrite jika semua record sudah valid.
     if (!needsRewrite) {
         return true;
     }
@@ -810,7 +761,6 @@ bool recoverQueueFiles(bool isEvent) {
                 record,
                 legacy
             )) {
-            // Tail rusak yang tidak lengkap boleh dibuang.
             if (lineResult == LineResult::UNTERMINATED) {
                 break;
             }
@@ -847,7 +797,6 @@ bool recoverQueueFiles(bool isEvent) {
         return false;
     }
 
-    // Pertahankan file asli sampai file baru siap.
     if (LittleFS.exists(backup)) {
         if (!LittleFS.remove(backup)) {
             LittleFS.remove(temp);
@@ -978,28 +927,6 @@ size_t countRecords(const char* path) {
     return count;
 }
 
-// ------------------------------------------------------------
-// QUEUE SIZE
-// ------------------------------------------------------------
-
-size_t queueSize(const char* path) {
-    if (!LittleFS.exists(path)) {
-        return 0;
-    }
-
-    File file = LittleFS.open(path, "r");
-
-    if (!file) {
-        return 0;
-    }
-
-    size_t result = file.size();
-
-    file.close();
-
-    return result;
-}
-
 } // namespace
 
 // ============================================================
@@ -1077,23 +1004,56 @@ bool offlineStorageBegin() {
 }
 
 // ------------------------------------------------------------
-// ENQUEUE
+// GENERATE RECORD ID
+// ------------------------------------------------------------
+
+bool offlineStorageGenerateRecordId(
+    char* buffer,
+    size_t bufferSize
+) {
+    if (!storageReady ||
+        buffer == nullptr ||
+        bufferSize < MAX_RECORD_ID_LENGTH + 1) {
+        return false;
+    }
+
+    String recordId;
+
+    if (!generateRecordId(recordId)) {
+        return false;
+    }
+
+    if (recordId.length() + 1 > bufferSize) {
+        return false;
+    }
+
+    recordId.toCharArray(buffer, bufferSize);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// ENQUEUE WITH EXPLICIT RECORD ID
 // ------------------------------------------------------------
 
 bool offlineStorageEnqueue(
+    const char* recordId,
     const char* topic,
     const char* payload,
     bool isEvent
 ) {
     if (!storageReady ||
+        recordId == nullptr ||
         topic == nullptr ||
         payload == nullptr ||
+        recordId[0] == '\0' ||
         topic[0] == '\0' ||
         payload[0] == '\0') {
         return false;
     }
 
-    if (containsInvalidCharacter(topic) ||
+    if (containsInvalidCharacter(recordId) ||
+        containsInvalidCharacter(topic) ||
         containsInvalidCharacter(payload)) {
         Serial.println(
             "[OFFLINE] ERROR: karakter pemisah tidak valid."
@@ -1102,10 +1062,53 @@ bool offlineStorageEnqueue(
         return false;
     }
 
-    if (strlen(topic) > MAX_TOPIC_LENGTH ||
+    if (strlen(recordId) > MAX_RECORD_ID_LENGTH ||
+        strlen(topic) > MAX_TOPIC_LENGTH ||
         strlen(payload) > MAX_PAYLOAD_LENGTH) {
         Serial.println(
-            "[OFFLINE] ERROR: ukuran topic/payload melewati batas."
+            "[OFFLINE] ERROR: ukuran record melewati batas."
+        );
+
+        return false;
+    }
+
+    OfflineRecord record;
+
+    record.recordId = recordId;
+    record.topic = topic;
+    record.payload = payload;
+    record.isEvent = isEvent;
+
+    if (!isValidRecord(record)) {
+        Serial.println(
+            "[OFFLINE] ERROR: record tidak valid."
+        );
+
+        return false;
+    }
+
+    // Pastikan ID tidak digunakan oleh record lain.
+    SearchResult eventResult = findRecord(
+        true,
+        record.recordId
+    );
+
+    if (eventResult != SearchResult::NOT_FOUND) {
+        Serial.println(
+            "[OFFLINE] ERROR: recordId sudah ada atau antrean event bermasalah."
+        );
+
+        return false;
+    }
+
+    SearchResult telemetryResult = findRecord(
+        false,
+        record.recordId
+    );
+
+    if (telemetryResult != SearchResult::NOT_FOUND) {
+        Serial.println(
+            "[OFFLINE] ERROR: recordId sudah ada atau antrean telemetry bermasalah."
         );
 
         return false;
@@ -1126,20 +1129,6 @@ bool offlineStorageEnqueue(
 
     const size_t telemetryLimit =
         overallLimit - eventReserve;
-
-    OfflineRecord record;
-
-    if (!generateRecordId(record.recordId)) {
-        return false;
-    }
-
-    record.topic = topic;
-    record.payload = payload;
-    record.isEvent = isEvent;
-
-    if (!isValidRecord(record)) {
-        return false;
-    }
 
     String serialized = makeRecord(record);
 
@@ -1191,6 +1180,36 @@ bool offlineStorageEnqueue(
 }
 
 // ------------------------------------------------------------
+// LEGACY ENQUEUE
+//
+// Dipertahankan untuk kompatibilitas pemanggil lama.
+// Integrasi MQTT berikutnya harus menggunakan overload
+// dengan recordId eksplisit.
+// ------------------------------------------------------------
+
+bool offlineStorageEnqueue(
+    const char* topic,
+    const char* payload,
+    bool isEvent
+) {
+    char recordId[MAX_RECORD_ID_LENGTH + 1];
+
+    if (!offlineStorageGenerateRecordId(
+            recordId,
+            sizeof(recordId)
+        )) {
+        return false;
+    }
+
+    return offlineStorageEnqueue(
+        recordId,
+        topic,
+        payload,
+        isEvent
+    );
+}
+
+// ------------------------------------------------------------
 // PEEK
 // ------------------------------------------------------------
 
@@ -1204,8 +1223,7 @@ bool offlineStoragePeek(OfflineRecord& record) {
         return true;
     }
 
-    // Jika file event ada tetapi record pertamanya rusak,
-    // jangan langsung menganggap antrean event kosong.
+    // Jangan melewati antrean event yang rusak.
     if (LittleFS.exists(EVENT_FILE) &&
         queueSize(EVENT_FILE) > 0) {
 
@@ -1259,7 +1277,6 @@ bool offlineStorageRemove(const char* recordId) {
 
     String targetId = recordId;
 
-    // Cari di event terlebih dahulu.
     SearchResult eventResult = findRecord(
         true,
         targetId
@@ -1286,7 +1303,6 @@ bool offlineStorageRemove(const char* recordId) {
         return true;
     }
 
-    // Jika tidak ada di event, cari telemetry.
     SearchResult telemetryResult = findRecord(
         false,
         targetId
