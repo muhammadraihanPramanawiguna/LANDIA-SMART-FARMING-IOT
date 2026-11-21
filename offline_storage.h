@@ -1,12 +1,10 @@
-
 #ifndef OFFLINE_STORAGE_H
 #define OFFLINE_STORAGE_H
 
 #include <Arduino.h>
 
 // ============================================================
-// OFFLINE RECORD
-// LANDIA FARM - ESP32 LITTLEFS QUEUE
+// OFFLINE RECORD - LANDIA FARM ESP32 LITTLEFS QUEUE
 // ============================================================
 
 struct OfflineRecord {
@@ -21,14 +19,12 @@ struct OfflineRecord {
 // ============================================================
 
 bool offlineStorageBegin();
-
 bool offlineStorageIsReady();
 
 // ============================================================
 // RECORD ID
 // ============================================================
 
-// Membuat ID unik untuk satu record.
 bool offlineStorageGenerateRecordId(
     char* buffer,
     size_t bufferSize
@@ -38,8 +34,6 @@ bool offlineStorageGenerateRecordId(
 // ENQUEUE
 // ============================================================
 
-// Menyimpan record dengan ID yang sudah dibuat pemanggil.
-// recordId harus sama dengan recordId di payload JSON.
 bool offlineStorageEnqueue(
     const char* recordId,
     const char* topic,
@@ -47,7 +41,7 @@ bool offlineStorageEnqueue(
     bool isEvent
 );
 
-// API lama dipertahankan untuk kompatibilitas.
+// API lama untuk kompatibilitas.
 bool offlineStorageEnqueue(
     const char* topic,
     const char* payload,
@@ -58,6 +52,13 @@ bool offlineStorageEnqueue(
 // QUEUE ACCESS
 // ============================================================
 
+// Membaca antrean telemetry saja; tidak menghapus record.
+bool offlineStoragePeekTelemetry(OfflineRecord& record);
+
+// Membaca antrean event saja; tidak menghapus record.
+bool offlineStoragePeekEvent(OfflineRecord& record);
+
+// API lama: event diprioritaskan untuk kompatibilitas.
 bool offlineStoragePeek(OfflineRecord& record);
 
 // ============================================================
@@ -71,7 +72,6 @@ bool offlineStorageRemove(const char* recordId);
 // ============================================================
 
 size_t offlineStorageTelemetryCount();
-
 size_t offlineStorageEventCount();
 
-#endif
+#endif // OFFLINE_STORAGE_H

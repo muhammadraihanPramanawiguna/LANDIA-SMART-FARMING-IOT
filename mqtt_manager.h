@@ -10,24 +10,16 @@
 #include "water_level.h"
 #include "rtc_manager.h"
 
-// ============================================================
-// MQTT MANAGER
-// Communication layer untuk Landia Farm
-//
-// Prinsip:
-// - MQTT tidak mengontrol irrigation controller
-// - MQTT tidak boleh memblokir loop utama
-// - WiFi/MQTT failure tidak menghentikan local control
-// ============================================================
+// MQTT hanya menangani komunikasi. Kontrol irigasi tetap lokal di ESP32.
+// Wi-Fi/MQTT/ACK tidak boleh menjadi syarat scheduler atau relay bekerja.
 
 void mqttInit();
-
 void mqttUpdate();
 
 bool mqttIsConnected();
 bool wifiIsConnected();
 
-// Publish telemetry seluruh sensor
+// Menyimpan telemetry valid ke LittleFS; mqttUpdate mengirim antreannya.
 void mqttPublishTelemetry(
     const DHTData &dht,
     const SoilData &soil,
@@ -37,11 +29,12 @@ void mqttPublishTelemetry(
     const RTCData &rtc
 );
 
-// Publish event irrigation
+// Menyimpan event irigasi ke antrean event LittleFS.
+// Pengiriman menunggu backend memiliki consumer dan application ACK event.
 void mqttPublishIrrigationEvent(
     const char *event,
     const char *state,
     const RTCData &rtc
 );
 
-#endif
+#endif // MQTT_MANAGER_H

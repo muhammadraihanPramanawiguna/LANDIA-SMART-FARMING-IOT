@@ -16,7 +16,7 @@
 // - Checksum untuk validasi integritas record.
 // - Recovery untuk menangani interrupted write.
 // - Compaction hanya ketika record mendapat ACK.
-// - Event queue diprioritaskan.
+// - Telemetry dan event memiliki akses antrean terpisah.
 // - Tidak melakukan format LittleFS otomatis.
 // ============================================================
 
@@ -1210,7 +1210,63 @@ bool offlineStorageEnqueue(
 }
 
 // ------------------------------------------------------------
-// PEEK
+// PEEK TELEMETRY QUEUE
+// ------------------------------------------------------------
+
+bool offlineStoragePeekTelemetry(OfflineRecord& record) {
+    if (!storageReady) {
+        Serial.println(
+            "[OFFLINE] Storage belum siap untuk telemetry."
+        );
+        return false;
+    }
+
+    if (!readFirstRecord(false, record)) {
+        return false;
+    }
+
+    if (record.isEvent) {
+        Serial.println(
+            "[OFFLINE] ERROR: telemetry queue berisi event."
+        );
+        return false;
+    }
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// PEEK EVENT QUEUE
+// ------------------------------------------------------------
+
+bool offlineStoragePeekEvent(OfflineRecord& record) {
+    if (!storageReady) {
+        Serial.println(
+            "[OFFLINE] Storage belum siap untuk event."
+        );
+        return false;
+    }
+
+    if (!readFirstRecord(true, record)) {
+        return false;
+    }
+
+    if (!record.isEvent) {
+        Serial.println(
+            "[OFFLINE] ERROR: event queue berisi telemetry."
+        );
+        return false;
+    }
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// LEGACY PEEK
+// ------------------------------------------------------------
+// Dipertahankan untuk kompatibilitas pemanggil lama.
+// Perilaku lama: event diprioritaskan.
+// MQTT manager baru harus memakai peek terpisah.
 // ------------------------------------------------------------
 
 bool offlineStoragePeek(OfflineRecord& record) {
@@ -1218,48 +1274,22 @@ bool offlineStoragePeek(OfflineRecord& record) {
         return false;
     }
 
-    // Event selalu diprioritaskan.
-    if (readFirstRecord(true, record)) {
+    if (offlineStoragePeekEvent(record)) {
         return true;
     }
 
-    // Jangan melewati antrean event yang rusak.
+    // Jangan melewati event pertama jika antrean event
+    // memiliki data tetapi record pertamanya tidak dapat dibaca.
     if (LittleFS.exists(EVENT_FILE) &&
         queueSize(EVENT_FILE) > 0) {
-
-        File eventFile = LittleFS.open(EVENT_FILE, "r");
-
-        if (!eventFile) {
-            return false;
-        }
-
-        bool hasData = eventFile.size() > 0;
-        eventFile.close();
-
-        if (hasData) {
-            OfflineRecord check;
-            String line;
-
-            eventFile = LittleFS.open(EVENT_FILE, "r");
-
-            if (!eventFile) {
-                return false;
-            }
-
-            LineResult lineResult = readLine(eventFile, line);
-            eventFile.close();
-
-            bool legacy = false;
-
-            if (lineResult == LineResult::TOO_LONG ||
-                (lineResult != LineResult::NONE &&
-                 !parseRecord(line, true, check, legacy))) {
-                return false;
-            }
-        }
+        Serial.println(
+            "[OFFLINE] Event queue bermasalah. "
+            "Telemetry tidak diprioritaskan oleh legacy peek."
+        );
+        return false;
     }
 
-    return readFirstRecord(false, record);
+    return offlineStoragePeekTelemetry(record);
 }
 
 // ------------------------------------------------------------

@@ -727,11 +727,6 @@ void mqttConnect() {
         lastRecordPublish = 0;
         lastBacklogSend = 0;
 
-        mqttClient.publish(
-            TOPIC_IRRIGATION_EVENT,
-            "{\"event\":\"device_online\",\"deviceId\":\"landia-esp32-01\"}",
-            false
-        );
 
     } else {
 
@@ -782,18 +777,16 @@ bool publishOneBacklogRecord() {
 
     OfflineRecord record;
 
-    if (!offlineStoragePeek(record)) {
+    // Ambil hanya antrean telemetry. Antrean event memiliki jalur
+    // terpisah agar event yang rusak/tidak terbaca tidak memblokir sensor.
+    if (!offlineStoragePeekTelemetry(record)) {
         return false;
     }
 
-    // Queue ini hanya untuk telemetry sensor.
-    // Event irigasi tidak boleh menunggu ACK sensor.
     if (record.isEvent) {
         Serial.println(
-            "[MQTT] Record event ditemukan di antrean telemetry. "
-            "Perlu penanganan antrean event terpisah."
+            "[MQTT] ERROR: record event ditemukan pada antrean telemetry."
         );
-
         return false;
     }
 
@@ -986,87 +979,98 @@ void mqttPublishIrrigationEvent(
     const char* state,
     const RTCData& rtc
 ) {
-
     (void)rtc;
 
-    if (event == nullptr ||
-        state == nullptr) {
+    if (event == nullptr || state == nullptr ||
+        event[0] == '\0' || state[0] == '\0') {
+        Serial.println("[EVENT] Event/state kosong; record dilewati.");
         return;
     }
 
-    if (!mqttClient.connected()) {
-
+    if (!storageReady) {
         Serial.println(
-            "[MQTT] Irrigation event tidak terkirim: broker offline."
+            "[EVENT] LittleFS tidak tersedia. Event tidak dapat disimpan."
         );
-
         return;
     }
 
-    char payload[256];
+    char recordId[41];
+    char payload[384];
+
+    if (!generateRecordId(recordId, sizeof(recordId))) {
+        Serial.println("[EVENT] Gagal membuat recordId.");
+        return;
+    }
 
     String timestamp = getBackendTimestamp();
-
-    int length;
+    int length = 0;
 
     if (timestamp.length() > 0) {
-
         length = snprintf(
             payload,
             sizeof(payload),
             "{"
+            "\"recordId\":\"%s\","
+            "\"deviceId\":\"%s\","
             "\"event\":\"%s\","
             "\"state\":\"%s\","
-            "\"deviceId\":\"%s\","
             "\"timestamp\":\"%s\""
             "}",
+            recordId,
+            DEVICE_ID,
             event,
             state,
-            DEVICE_ID,
             timestamp.c_str()
         );
-
     } else {
-
         length = snprintf(
             payload,
             sizeof(payload),
             "{"
+            "\"recordId\":\"%s\","
+            "\"deviceId\":\"%s\","
             "\"event\":\"%s\","
-            "\"state\":\"%s\","
-            "\"deviceId\":\"%s\""
+            "\"state\":\"%s\""
             "}",
+            recordId,
+            DEVICE_ID,
             event,
-            state,
-            DEVICE_ID
+            state
         );
     }
 
-    if (length <= 0 ||
-        length >= (int)sizeof(payload)) {
-        Serial.println(
-            "[MQTT] Gagal membuat payload irrigation event."
-        );
-
+    if (length <= 0 || length >= (int)sizeof(payload)) {
+        Serial.println("[EVENT] Payload terlalu panjang/gagal dibuat.");
         return;
     }
 
-    if (!mqttClient.publish(
+    // Snapshot backend yang diberikan belum memiliki consumer MQTT
+    // untuk landia/irrigation/event maupun application ACK event.
+    // Karena itu event disimpan dulu dan TIDAK dihapus hanya karena
+    // broker menerima publish QoS 0. Ini mencegah kehilangan histori.
+    if (!offlineStorageEnqueue(
+            recordId,
             TOPIC_IRRIGATION_EVENT,
             payload,
-            false
+            true
         )) {
-
-        Serial.println(
-            "[MQTT] Gagal publish irrigation event."
-        );
-
+        Serial.println("[EVENT] Gagal menyimpan event ke LittleFS.");
         return;
     }
 
     Serial.printf(
-        "[MQTT] Irrigation event terkirim: %s | %s\n",
+        "[EVENT] Tersimpan di LittleFS: %s | %s | %s\n",
+        recordId,
         event,
         state
     );
+
+    if (mqttClient.connected()) {
+        Serial.println(
+            "[EVENT] MQTT online, tetapi pengiriman ditahan sampai backend "
+            "menyediakan consumer + ACK event."
+        );
+    } else {
+        Serial.println("[EVENT] MQTT offline; event aman di antrean lokal.");
+    }
 }
