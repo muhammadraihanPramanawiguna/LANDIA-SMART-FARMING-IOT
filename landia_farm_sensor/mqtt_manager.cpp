@@ -297,6 +297,7 @@ bool queueTelemetrySet(
         Serial.println("[SENSOR] DHT tidak valid, dilewati.");
     }
 
+
     // ========================================================
     // 2. SOIL MOISTURE SENSOR
     // ========================================================
@@ -307,20 +308,42 @@ bool queueTelemetrySet(
             allSaved = false;
         } else {
 
-            length = snprintf(
-                payload,
-                sizeof(payload),
-                "{"
-                "\"recordId\":\"%s\","
-                "\"deviceId\":\"%s\","
-                "\"sensorId\":\"landia-soil-01\","
-                "\"value\":%.2f,"
-                "\"unit\":\"%%\""
-                "}",
-                recordId,
-                DEVICE_ID,
-                soil.moisturePercent
-            );
+            if (timestamp.length() > 0) {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-soil-01\","
+                    "\"value\":%.2f,"
+                    "\"unit\":\"%%\","
+                    "\"recordedAt\":\"%s\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    soil.moisturePercent,
+                    timestamp.c_str()
+                );
+
+            } else {
+
+                length = snprintf(
+                    payload,
+                    sizeof(payload),
+                    "{"
+                    "\"recordId\":\"%s\","
+                    "\"deviceId\":\"%s\","
+                    "\"sensorId\":\"landia-soil-01\","
+                    "\"value\":%.2f,"
+                    "\"unit\":\"%%\""
+                    "}",
+                    recordId,
+                    DEVICE_ID,
+                    soil.moisturePercent
+                );
+            }
 
             if (length <= 0 ||
                 length >= (int)sizeof(payload) ||
@@ -329,6 +352,7 @@ bool queueTelemetrySet(
                     payload,
                     recordId
                 )) {
+
                 allSaved = false;
             }
         }
