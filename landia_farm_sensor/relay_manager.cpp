@@ -1,4 +1,3 @@
-
 #include <Arduino.h>
 
 #include "config.h"
@@ -8,16 +7,14 @@
 // RELAY STATE
 // =====================================================
 
+// Ini adalah state perintah dari ESP32, bukan feedback
+// fisik dari kontak relay.
 static bool relayState = false;
 
 
 // =====================================================
 // RELAY OUTPUT CONFIGURATION
 // =====================================================
-
-// Relay active-low:
-// LOW  = ON
-// HIGH = OFF
 
 static constexpr uint8_t RELAY_ON_LEVEL =
     RELAY_ACTIVE_LOW ? LOW : HIGH;
@@ -32,28 +29,17 @@ static constexpr uint8_t RELAY_OFF_LEVEL =
 
 void relayInit() {
 
-    // Atur level OFF sebelum pin menjadi OUTPUT
-    // untuk mengurangi risiko pulsa ON saat inisialisasi.
-
-    digitalWrite(
-        RELAY_PIN,
-        RELAY_OFF_LEVEL
-    );
-
-    pinMode(
-        RELAY_PIN,
-        OUTPUT
-    );
+    // Set output latch ke OFF sebelum pin menjadi OUTPUT.
+    // Untuk kondisi sebelum setup(), tetap gunakan pull-up
+    // hardware pada input relay active-low.
+    digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
 
     relayState = false;
 
-    Serial.println(
-        "[RELAY] Relay initialized"
-    );
-
-    Serial.println(
-        "[RELAY] Initial state: OFF"
-    );
+    Serial.println("[RELAY] Relay initialized");
+    Serial.println("[RELAY] Initial state: OFF");
 }
 
 
@@ -63,16 +49,14 @@ void relayInit() {
 
 void relayOn() {
 
-    digitalWrite(
-        RELAY_PIN,
-        RELAY_ON_LEVEL
-    );
+    if (relayState) {
+        return;
+    }
 
+    digitalWrite(RELAY_PIN, RELAY_ON_LEVEL);
     relayState = true;
 
-    Serial.println(
-        "[RELAY] Pump command: ON"
-    );
+    Serial.println("[RELAY] Pump command: ON");
 }
 
 
@@ -82,16 +66,17 @@ void relayOn() {
 
 void relayOff() {
 
-    digitalWrite(
-        RELAY_PIN,
-        RELAY_OFF_LEVEL
-    );
+    // Tetap tulis OFF sebagai tindakan fail-safe,
+    // meskipun state software sudah OFF.
+    digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
+
+    if (!relayState) {
+        return;
+    }
 
     relayState = false;
 
-    Serial.println(
-        "[RELAY] Pump command: OFF"
-    );
+    Serial.println("[RELAY] Pump command: OFF");
 }
 
 

@@ -90,6 +90,10 @@ void setup()
     Serial.println("========================================");
     Serial.println();
 
+    // SAFETY FIRST: initialize pump relay to OFF
+    // before sensors, I2C, LCD, RTC, and communication.
+    relayInit();
+
 
     // =================================================
     // SENSOR INITIALIZATION
@@ -115,6 +119,7 @@ void setup()
     Serial.println("[SYSTEM] Initializing RTC...");
 
     rtcInit();
+    rtcData = rtcRead();
 
 
     // =================================================
@@ -124,15 +129,6 @@ void setup()
     Serial.println("[SYSTEM] Initializing LCD...");
 
     lcdInit();
-
-
-    // =================================================
-    // RELAY
-    // =================================================
-
-    Serial.println("[SYSTEM] Initializing relay...");
-
-    relayInit();
 
 
     // =================================================
@@ -268,17 +264,6 @@ void loop() {
     }
 
     // =================================================
-    // 7. MQTT BACKGROUND
-    // =================================================
-    //
-    // Mengelola koneksi Wi-Fi/MQTT.
-    // Fungsi harus non-blocking.
-    // Kontrol lokal tidak bergantung pada MQTT.
-    // =================================================
-
-    mqttUpdate();
-
-    // =================================================
     // 8. NTP BACKGROUND SYNCHRONIZATION
     // =================================================
     //
@@ -316,7 +301,18 @@ void loop() {
     );
 
     // =================================================
-    // 10. MQTT TELEMETRY
+    // 10. MQTT BACKGROUND
+    // =================================================
+    //
+    // Komunikasi dijalankan setelah evaluasi kontrol lokal.
+    // mqttUpdate() tetap harus non-blocking sebisa mungkin.
+    // =================================================
+
+    mqttUpdate();
+
+
+    // =================================================
+    // 11. MQTT TELEMETRY
     // =================================================
 
     if (
@@ -337,7 +333,7 @@ void loop() {
 
 
     // =================================================
-    // 10. LCD
+    // 12. LCD
     // =================================================
 
     if (schedulerLCD())
@@ -390,7 +386,7 @@ void loop() {
 
 
     // =================================================
-    // 11. SERIAL MONITOR
+    // 13. SERIAL MONITOR
     // =================================================
 
     if (schedulerSerial())

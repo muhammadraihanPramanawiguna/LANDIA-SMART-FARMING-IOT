@@ -92,6 +92,13 @@ unsigned long lastRecordPublish = 0;
 
 bool storageReady = false;
 
+// ACK subscription wajib aktif sebelum telemetry dikirim.
+// Tanpa subscription, ESP32 tidak akan menerima konfirmasi backend.
+bool ackSubscriptionReady = false;
+bool ackSubscribeAttempted = false;
+unsigned long lastAckSubscribeAttempt = 0;
+const unsigned long ACK_SUBSCRIBE_INTERVAL = 5000UL;
+
 // Satu record dikirim dan menunggu application ACK.
 String inFlightRecordId;
 String inFlightSensorType;
@@ -680,6 +687,52 @@ void mqttEnsureWiFi() {
 }
 
 // ------------------------------------------------------------
+// ENSURE ACK SUBSCRIPTION
+// ------------------------------------------------------------
+
+bool ensureAckSubscription() {
+
+    if (!mqttClient.connected()) {
+        ackSubscriptionReady = false;
+        return false;
+    }
+
+    if (ackSubscriptionReady) {
+        return true;
+    }
+
+    const unsigned long now = millis();
+
+    if (ackSubscribeAttempted &&
+        now - lastAckSubscribeAttempt < ACK_SUBSCRIBE_INTERVAL) {
+        return false;
+    }
+
+    ackSubscribeAttempted = true;
+    lastAckSubscribeAttempt = now;
+
+    Serial.printf(
+        "[MQTT] Mencoba subscribe ACK: %s\\n",
+        TOPIC_ACK
+    );
+
+    if (mqttClient.subscribe(TOPIC_ACK, 1)) {
+        ackSubscriptionReady = true;
+
+        Serial.printf(
+            "[MQTT] ACK subscription berhasil: %s\\n",
+            TOPIC_ACK
+        );
+
+        return true;
+    }
+
+    ackSubscriptionReady = false;
+    Serial.println("[MQTT] Subscribe ACK gagal. Akan dicoba ulang.");
+    return false;
+}
+
+// ------------------------------------------------------------
 // MQTT CONNECT
 // ------------------------------------------------------------
 
@@ -690,13 +743,17 @@ void mqttConnect() {
         return;
     }
 
-    unsigned long now = millis();
+    const unsigned long now = millis();
 
-    if (now - lastMQTTAttempt <
-        MQTT_RECONNECT_INTERVAL) {
+    // Percobaan pertama boleh langsung dilakukan; berikutnya diberi jeda.
+    static bool connectionAttempted = false;
+
+    if (connectionAttempted &&
+        now - lastMQTTAttempt < MQTT_RECONNECT_INTERVAL) {
         return;
     }
 
+    connectionAttempted = true;
     lastMQTTAttempt = now;
 
     Serial.println("[MQTT] Connecting to broker...");
@@ -705,33 +762,27 @@ void mqttConnect() {
 
         Serial.println("[MQTT] Connected.");
 
-        if (mqttClient.subscribe(TOPIC_ACK, 1)) {
+        // Status subscription selalu dianggap belum siap setelah connect.
+        ackSubscriptionReady = false;
+        ackSubscribeAttempted = false;
+        lastAckSubscribeAttempt = 0;
 
-            Serial.printf(
-                "[MQTT] Subscribed ACK: %s\n",
-                TOPIC_ACK
-            );
-
-        } else {
-
-            Serial.println(
-                "[MQTT] Gagal subscribe ACK."
-            );
-        }
-
-        // Setelah reconnect, record yang belum mendapat
-        // application ACK akan dikirim ulang.
+        // Record yang belum mendapat ACK akan dikirim ulang.
         inFlightRecordId = "";
         inFlightSensorType = "";
 
         lastRecordPublish = 0;
         lastBacklogSend = 0;
 
+        // Langsung coba subscribe. Jika gagal, mqttUpdate akan retry.
+        ensureAckSubscription();
 
     } else {
 
+        ackSubscriptionReady = false;
+
         Serial.printf(
-            "[MQTT] Connection failed. State=%d\n",
+            "[MQTT] Connection failed. State=%d\\n",
             mqttClient.state()
         );
     }
@@ -744,7 +795,8 @@ void mqttConnect() {
 bool publishOneBacklogRecord() {
 
     if (!mqttClient.connected() ||
-        !storageReady) {
+        !storageReady ||
+        !ackSubscriptionReady) {
         return false;
     }
 
@@ -899,23 +951,28 @@ bool mqttIsConnected() {
 void mqttUpdate() {
 
     if (!wifiIsConnected()) {
+        ackSubscriptionReady = false;
         mqttEnsureWiFi();
         return;
     }
 
     if (!mqttClient.connected()) {
+        ackSubscriptionReady = false;
         mqttConnect();
         return;
     }
 
-    // Memproses pesan masuk, termasuk application ACK.
+    // Proses ACK dan pesan MQTT masuk.
     mqttClient.loop();
 
-    unsigned long now = millis();
+    // Jangan mengirim telemetry sebelum ACK topic berhasil disubscribe.
+    if (!ensureAckSubscription()) {
+        return;
+    }
 
-    if (now - lastBacklogSend >=
-        BACKLOG_SEND_INTERVAL) {
+    const unsigned long now = millis();
 
+    if (now - lastBacklogSend >= BACKLOG_SEND_INTERVAL) {
         publishOneBacklogRecord();
     }
 }

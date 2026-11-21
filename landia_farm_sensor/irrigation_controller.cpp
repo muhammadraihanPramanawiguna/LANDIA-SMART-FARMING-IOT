@@ -5,6 +5,7 @@
 #include "config.h"
 #include "irrigation_controller.h"
 #include "relay_manager.h"
+#include "mqtt_manager.h"
 
 // =====================================================
 // INTERNAL STATE
@@ -19,13 +20,10 @@ static IrrigationState irrigationState = IRRIGATION_IDLE;
 // =====================================================
 
 static float irrigationStartLitres = 0.0f;
-
 static float lastSessionLitres = 0.0f;
-
 static float lastSessionCost = 0.0f;
 
 static unsigned long irrigationStartMillis = 0;
-
 static float lastKnownFlowTotalLitres = 0.0f;
 
 // =====================================================
@@ -39,29 +37,30 @@ static unsigned long lastFlowDetectionMillis = 0;
 // =====================================================
 
 static bool scheduleHandledToday = false;
-
 static long lastScheduleDateKey = -1;
+
+// =====================================================
+// LOW WATER LOG CONTROL
+// =====================================================
+
+static bool lowWaterLogged = false;
 
 // =====================================================
 // SENSOR VALIDATION
 // =====================================================
 
 static bool isValidPercentage(float value) {
-
-    return
-        isfinite(value) &&
-        value >= 0.0f &&
-        value <= 100.0f;
+    return isfinite(value) &&
+           value >= 0.0f &&
+           value <= 100.0f;
 }
 
 static bool isValidFlowData(const FlowData& flow) {
-
-    return
-        flow.valid &&
-        isfinite(flow.flowRateLMin) &&
-        isfinite(flow.totalLitres) &&
-        flow.flowRateLMin >= 0.0f &&
-        flow.totalLitres >= 0.0f;
+    return flow.valid &&
+           isfinite(flow.flowRateLMin) &&
+           isfinite(flow.totalLitres) &&
+           flow.flowRateLMin >= 0.0f &&
+           flow.totalLitres >= 0.0f;
 }
 
 static bool isValidControlSensors(
@@ -69,15 +68,11 @@ static bool isValidControlSensors(
     const FlowData& flow,
     const WaterLevelData& waterLevel
 ) {
-
-    return
-        soil.valid &&
-        isValidPercentage(soil.moisturePercent) &&
-
-        isValidFlowData(flow) &&
-
-        waterLevel.valid &&
-        isValidPercentage(waterLevel.waterLevelPercent);
+    return soil.valid &&
+           isValidPercentage(soil.moisturePercent) &&
+           isValidFlowData(flow) &&
+           waterLevel.valid &&
+           isValidPercentage(waterLevel.waterLevelPercent);
 }
 
 // =====================================================
@@ -85,9 +80,7 @@ static bool isValidControlSensors(
 // =====================================================
 
 static float getSafeFlowTotal(const FlowData& flow) {
-
     if (isValidFlowData(flow)) {
-
         lastKnownFlowTotalLitres = flow.totalLitres;
     }
 
@@ -99,11 +92,41 @@ static float getSafeFlowTotal(const FlowData& flow) {
 // =====================================================
 
 static long getDateKey(const RTCData& rtc) {
+    return (rtc.year * 10000L) +
+           (rtc.month * 100L) +
+           rtc.day;
+}
 
-    return
-        (rtc.year * 10000L) +
-        (rtc.month * 100L) +
-        rtc.day;
+// =====================================================
+// EVENT STATE
+// =====================================================
+
+static const char* getIrrigationEventState(
+    IrrigationState state
+) {
+    switch (state) {
+
+        case IRRIGATION_COMPLETED:
+            return "COMPLETED";
+
+        case IRRIGATION_LOW_WATER:
+            return "LOW_WATER";
+
+        case IRRIGATION_SENSOR_ERROR:
+            return "SENSOR_ERROR";
+
+        case IRRIGATION_FLOW_ERROR:
+            return "FLOW_ERROR";
+
+        case IRRIGATION_TIMEOUT:
+            return "TIMEOUT";
+
+        case IRRIGATION_SKIPPED:
+            return "SKIPPED";
+
+        default:
+            return "STOPPED";
+    }
 }
 
 // =====================================================
@@ -117,31 +140,26 @@ void irrigationInit() {
     irrigationState = IRRIGATION_IDLE;
 
     irrigationStartLitres = 0.0f;
-
     lastSessionLitres = 0.0f;
-
     lastSessionCost = 0.0f;
 
     irrigationStartMillis = 0;
-
     lastKnownFlowTotalLitres = 0.0f;
 
     lastFlowDetectionMillis = 0;
 
     scheduleHandledToday = false;
-
     lastScheduleDateKey = -1;
 
-    // SAFETY: PUMP MUST BE OFF DURING BOOT.
+    lowWaterLogged = false;
 
+    // SAFETY: PUMP MUST BE OFF DURING BOOT.
     relayOff();
 
     Serial.println("[IRRIGATION] Controller initialized");
-
     Serial.println("[IRRIGATION] Pump state: OFF");
-
     Serial.println("[IRRIGATION] Soil target: 85%");
-
+    Serial.println("[IRRIGATION] Automatic irrigation enabled");
     Serial.println("[IRRIGATION] Rain sensor does not block irrigation");
 }
 
@@ -152,75 +170,43 @@ void irrigationInit() {
 void irrigationNotifyTimeCorrection(const RTCData& rtc) {
 
     if (!rtc.valid) {
-
         Serial.println(
             "[IRRIGATION] RTC correction ignored: invalid RTC data"
         );
-
         return;
     }
 
     const long correctedDateKey = getDateKey(rtc);
 
-    const int correctedMinutes =
-        rtc.hour * 60 + rtc.minute;
-
-    const int scheduleMinutes =
-        IRRIGATION_SCHEDULE_HOUR * 60 +
-        IRRIGATION_SCHEDULE_MINUTE;
-
     const bool sameDate =
         correctedDateKey == lastScheduleDateKey;
 
-    const bool wasAlreadyHandled =
-        scheduleHandledToday;
-
-    lastScheduleDateKey = correctedDateKey;
-
-    if (sameDate) {
-
-        scheduleHandledToday =
-            wasAlreadyHandled ||
-            correctedMinutes >= scheduleMinutes;
-
-    } else {
-
-        scheduleHandledToday =
-            correctedMinutes >= scheduleMinutes;
+    // Jika tanggal berubah, buka jadwal untuk tanggal baru.
+    // Jika tanggal sama, pertahankan status jadwal sebelumnya.
+    if (!sameDate) {
+        lastScheduleDateKey = correctedDateKey;
+        scheduleHandledToday = false;
+        irrigationState = IRRIGATION_IDLE;
     }
 
     Serial.println("[IRRIGATION] RTC correction detected");
 
-    Serial.print("[IRRIGATION] Corrected RTC: ");
-
-    Serial.print(rtc.year);
-    Serial.print('-');
-
-    if (rtc.month < 10) Serial.print('0');
-    Serial.print(rtc.month);
-    Serial.print('-');
-
-    if (rtc.day < 10) Serial.print('0');
-    Serial.print(rtc.day);
-    Serial.print(' ');
-
-    if (rtc.hour < 10) Serial.print('0');
-    Serial.print(rtc.hour);
-    Serial.print(':');
-
-    if (rtc.minute < 10) Serial.print('0');
-    Serial.println(rtc.minute);
+    Serial.printf(
+        "[IRRIGATION] Corrected RTC: %04d-%02d-%02d %02d:%02d\n",
+        rtc.year,
+        rtc.month,
+        rtc.day,
+        rtc.hour,
+        rtc.minute
+    );
 
     if (scheduleHandledToday) {
-
         Serial.println(
-            "[IRRIGATION] Today's schedule locked after RTC correction"
+            "[IRRIGATION] Today's schedule already handled"
         );
-
     } else {
-
         Serial.println(
-            "[IRRIGATION] Today's scheduled window remains available"
+            "[IRRIGATION] Schedule remains available"
         );
     }
 }
@@ -247,7 +233,13 @@ static bool isWithinScheduleWindow(const RTCData& rtc) {
 
         scheduleHandledToday = false;
 
+        lowWaterLogged = false;
+
         irrigationState = IRRIGATION_IDLE;
+
+        Serial.println(
+            "[IRRIGATION] New day - Schedule reset"
+        );
     }
 
     // -------------------------------------------------
@@ -269,7 +261,6 @@ static bool isWithinScheduleWindow(const RTCData& rtc) {
     // -------------------------------------------------
 
     if (currentMinutes < scheduleMinutes) {
-
         return false;
     }
 
@@ -278,7 +269,6 @@ static bool isWithinScheduleWindow(const RTCData& rtc) {
     // -------------------------------------------------
 
     if (scheduleHandledToday) {
-
         return false;
     }
 
@@ -287,7 +277,6 @@ static bool isWithinScheduleWindow(const RTCData& rtc) {
     // -------------------------------------------------
 
     if (currentMinutes <= deadlineMinutes) {
-
         return true;
     }
 
@@ -310,7 +299,10 @@ static bool isWithinScheduleWindow(const RTCData& rtc) {
 // START IRRIGATION
 // =====================================================
 
-static void startIrrigation(const FlowData& flow) {
+static void startIrrigation(
+    const FlowData& flow,
+    const RTCData& rtc
+) {
 
     if (!isValidFlowData(flow)) {
 
@@ -318,13 +310,16 @@ static void startIrrigation(const FlowData& flow) {
 
         relayOff();
 
+        Serial.println(
+            "[IRRIGATION] Invalid flow data - START BLOCKED"
+        );
+
         return;
     }
 
     irrigationStartLitres = getSafeFlowTotal(flow);
 
     lastSessionLitres = 0.0f;
-
     lastSessionCost = 0.0f;
 
     irrigationStartMillis = millis();
@@ -335,19 +330,24 @@ static void startIrrigation(const FlowData& flow) {
 
     irrigationState = IRRIGATION_IRRIGATING;
 
+    lowWaterLogged = false;
+
     relayOn();
 
     Serial.println();
-
     Serial.println("[IRRIGATION] ========================");
-
     Serial.println("[IRRIGATION] PUMP ON");
 
     Serial.print("[IRRIGATION] Start total: ");
-
     Serial.print(irrigationStartLitres, 2);
-
     Serial.println(" L");
+
+    // Simpan event STARTED ke antrean LittleFS.
+    mqttPublishIrrigationEvent(
+        "IRRIGATION",
+        "STARTED",
+        rtc
+    );
 }
 
 // =====================================================
@@ -356,11 +356,11 @@ static void startIrrigation(const FlowData& flow) {
 
 static void stopIrrigation(
     IrrigationState finalState,
-    const FlowData& flow
+    const FlowData& flow,
+    const RTCData& rtc
 ) {
 
     // SAFETY: TURN PUMP OFF FIRST.
-
     relayOff();
 
     // -------------------------------------------------
@@ -377,7 +377,6 @@ static void stopIrrigation(
         !isfinite(lastSessionLitres) ||
         lastSessionLitres < 0.0f
     ) {
-
         lastSessionLitres = 0.0f;
     }
 
@@ -396,7 +395,25 @@ static void stopIrrigation(
 
     irrigationState = finalState;
 
-    scheduleHandledToday = true;
+    // LOW WATER boleh dicoba kembali selama
+    // jendela jadwal masih berlaku.
+    //
+    // Kondisi lainnya dianggap menyelesaikan
+    // atau menggagalkan jadwal hari ini.
+
+    if (finalState != IRRIGATION_LOW_WATER) {
+        scheduleHandledToday = true;
+    }
+
+    // -------------------------------------------------
+    // EVENT STORAGE
+    // -------------------------------------------------
+
+    mqttPublishIrrigationEvent(
+        "IRRIGATION",
+        getIrrigationEventState(finalState),
+        rtc
+    );
 
     // -------------------------------------------------
     // LOG
@@ -405,14 +422,14 @@ static void stopIrrigation(
     Serial.println("[IRRIGATION] PUMP OFF");
 
     Serial.print("[IRRIGATION] Session usage: ");
-
     Serial.print(lastSessionLitres, 2);
-
     Serial.println(" L");
 
     Serial.print("[IRRIGATION] Session cost: ");
-
     Serial.println(lastSessionCost, 2);
+
+    Serial.print("[IRRIGATION] Final state: ");
+    Serial.println(getIrrigationEventState(finalState));
 
     Serial.println("[IRRIGATION] ========================");
 }
@@ -429,8 +446,8 @@ void irrigationUpdate(
     const WaterLevelData& waterLevel
 ) {
 
-    // Rain Sensor hanya untuk monitoring.
-    // Tidak digunakan sebagai syarat atau penghalang irigasi.
+    // Rain sensor hanya untuk monitoring.
+    // Tidak digunakan sebagai penghalang irigasi.
 
     (void)rain;
 
@@ -444,7 +461,8 @@ void irrigationUpdate(
 
             stopIrrigation(
                 IRRIGATION_SENSOR_ERROR,
-                flow
+                flow,
+                rtc
             );
 
         } else {
@@ -462,7 +480,6 @@ void irrigationUpdate(
     // =================================================
 
     if (isValidFlowData(flow)) {
-
         getSafeFlowTotal(flow);
     }
 
@@ -486,7 +503,8 @@ void irrigationUpdate(
 
             stopIrrigation(
                 IRRIGATION_SENSOR_ERROR,
-                flow
+                flow,
+                rtc
             );
 
             Serial.println(
@@ -507,12 +525,37 @@ void irrigationUpdate(
 
             stopIrrigation(
                 IRRIGATION_TIMEOUT,
-                flow
+                flow,
+                rtc
             );
 
             Serial.println(
                 "[IRRIGATION] Maximum runtime reached"
             );
+
+            return;
+        }
+
+        // ---------------------------------------------
+        // LOW WATER PROTECTION
+        // ---------------------------------------------
+
+        if (
+            waterLevel.waterLevelPercent <=
+            WATER_LEVEL_MIN_IRRIGATION_PERCENT
+        ) {
+
+            stopIrrigation(
+                IRRIGATION_LOW_WATER,
+                flow,
+                rtc
+            );
+
+            Serial.println(
+                "[IRRIGATION] Low water -> PUMP OFF"
+            );
+
+            lowWaterLogged = true;
 
             return;
         }
@@ -540,32 +583,12 @@ void irrigationUpdate(
 
             stopIrrigation(
                 IRRIGATION_FLOW_ERROR,
-                flow
+                flow,
+                rtc
             );
 
             Serial.println(
                 "[IRRIGATION] No flow detected -> PUMP OFF"
-            );
-
-            return;
-        }
-
-        // ---------------------------------------------
-        // LOW WATER PROTECTION
-        // ---------------------------------------------
-
-        if (
-            waterLevel.waterLevelPercent <=
-            WATER_LEVEL_MIN_IRRIGATION_PERCENT
-        ) {
-
-            stopIrrigation(
-                IRRIGATION_LOW_WATER,
-                flow
-            );
-
-            Serial.println(
-                "[IRRIGATION] Water level low -> PUMP OFF"
             );
 
             return;
@@ -582,7 +605,8 @@ void irrigationUpdate(
 
             stopIrrigation(
                 IRRIGATION_COMPLETED,
-                flow
+                flow,
+                rtc
             );
 
             Serial.print(
@@ -590,7 +614,6 @@ void irrigationUpdate(
             );
 
             Serial.print(soil.moisturePercent, 1);
-
             Serial.println("%");
 
             return;
@@ -614,7 +637,6 @@ void irrigationUpdate(
     // =================================================
 
     if (!isWithinScheduleWindow(rtc)) {
-
         return;
     }
 
@@ -630,13 +652,21 @@ void irrigationUpdate(
         )
     ) {
 
+        if (
+            irrigationState !=
+            IRRIGATION_SENSOR_ERROR
+        ) {
+            Serial.println(
+                "[IRRIGATION] Invalid sensor -> START BLOCKED"
+            );
+        }
+
         irrigationState = IRRIGATION_SENSOR_ERROR;
 
         relayOff();
 
-        Serial.println(
-            "[IRRIGATION] Invalid control sensor -> START BLOCKED"
-        );
+        // Tidak mengunci jadwal.
+        // Sensor dapat pulih sebelum window berakhir.
 
         return;
     }
@@ -659,7 +689,6 @@ void irrigationUpdate(
         );
 
         Serial.print(soil.moisturePercent, 1);
-
         Serial.println("% -> SKIP");
 
         return;
@@ -674,19 +703,52 @@ void irrigationUpdate(
         WATER_LEVEL_MIN_IRRIGATION_PERCENT
     ) {
 
-        scheduleHandledToday = true;
-
         irrigationState = IRRIGATION_LOW_WATER;
 
         relayOff();
 
-        Serial.print("[IRRIGATION] Water level: ");
+        // Log hanya ketika pertama kali masuk
+        // kondisi LOW WATER.
 
-        Serial.print(waterLevel.waterLevelPercent, 1);
+        if (!lowWaterLogged) {
 
-        Serial.println("% -> LOW WATER");
+            Serial.print("[IRRIGATION] Water level: ");
+
+            Serial.print(
+                waterLevel.waterLevelPercent,
+                1
+            );
+
+            Serial.println(
+                "% -> LOW WATER, WAITING FOR REFILL"
+            );
+
+            lowWaterLogged = true;
+        }
+
+        // PENTING:
+        // scheduleHandledToday tetap FALSE.
+        // ESP32 dapat mencoba kembali secara otomatis.
 
         return;
+    }
+
+    // =================================================
+    // WATER RECOVERED
+    // =================================================
+
+    if (lowWaterLogged) {
+
+        Serial.print("[IRRIGATION] Water recovered: ");
+
+        Serial.print(
+            waterLevel.waterLevelPercent,
+            1
+        );
+
+        Serial.println("%");
+
+        lowWaterLogged = false;
     }
 
     // =================================================
@@ -698,7 +760,10 @@ void irrigationUpdate(
         SOIL_IRRIGATION_START_PERCENT
     ) {
 
-        startIrrigation(flow);
+        startIrrigation(
+            flow,
+            rtc
+        );
 
         return;
     }
@@ -709,7 +774,6 @@ void irrigationUpdate(
 // =====================================================
 
 bool irrigationIsActive() {
-
     return irrigationActive;
 }
 
@@ -718,7 +782,6 @@ bool irrigationIsActive() {
 // =====================================================
 
 IrrigationState irrigationGetState() {
-
     return irrigationState;
 }
 
@@ -768,6 +831,7 @@ float irrigationGetSessionCost() {
 
 void irrigationEmergencyStop() {
 
+    // SAFETY FIRST.
     relayOff();
 
     if (irrigationActive) {
@@ -780,12 +844,12 @@ void irrigationEmergencyStop() {
             !isfinite(lastSessionLitres) ||
             lastSessionLitres < 0.0f
         ) {
-
             lastSessionLitres = 0.0f;
         }
 
         lastSessionCost =
-            lastSessionLitres * WATER_COST_PER_LITER;
+            lastSessionLitres *
+            WATER_COST_PER_LITER;
     }
 
     irrigationActive = false;

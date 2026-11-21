@@ -616,6 +616,58 @@ bool compactQueue(
 }
 
 // ------------------------------------------------------------
+// VALIDATE QUEUE FILE
+// ------------------------------------------------------------
+
+// Digunakan saat recovery untuk memastikan file aktif/backup
+// benar-benar dapat dibaca sebelum file backup dihapus.
+bool validateQueueFile(const char* path, bool isEvent) {
+
+    if (!LittleFS.exists(path)) {
+        return false;
+    }
+
+    File file = LittleFS.open(path, "r");
+
+    if (!file) {
+        return false;
+    }
+
+    bool valid = true;
+    String line;
+
+    while (true) {
+        LineResult result = readLine(file, line);
+
+        if (result == LineResult::NONE) {
+            break;
+        }
+
+        if (result == LineResult::TOO_LONG) {
+            valid = false;
+            break;
+        }
+
+        OfflineRecord record;
+        bool legacy = false;
+
+        if (!parseRecord(line, isEvent, record, legacy)) {
+            valid = false;
+            break;
+        }
+
+        // Record terakhir tanpa newline tetap boleh dipulihkan,
+        // selama isi record dan checksum-nya valid.
+        if (result == LineResult::UNTERMINATED) {
+            break;
+        }
+    }
+
+    file.close();
+    return valid;
+}
+
+// ------------------------------------------------------------
 // QUEUE RECOVERY
 // ------------------------------------------------------------
 
@@ -624,34 +676,77 @@ bool recoverQueueFiles(bool isEvent) {
     const char* temp = tempPath(isEvent);
     const char* backup = backupPath(isEvent);
 
-    if (!LittleFS.exists(path) &&
-        LittleFS.exists(backup)) {
+    const bool pathExists = LittleFS.exists(path);
+    const bool backupExists = LittleFS.exists(backup);
+
+    if (!pathExists && backupExists) {
+
+        // Jangan restore backup yang checksum/format-nya rusak.
+        if (!validateQueueFile(backup, isEvent)) {
+            Serial.println(
+                "[OFFLINE] ERROR: backup antrean tidak valid; file dipertahankan."
+            );
+            return false;
+        }
 
         if (!LittleFS.rename(backup, path)) {
             Serial.println(
                 "[OFFLINE] ERROR: gagal memulihkan backup."
             );
-
             return false;
         }
-    }
 
-    if (LittleFS.exists(path) &&
-        LittleFS.exists(backup)) {
+    } else if (pathExists && backupExists) {
 
-        if (!LittleFS.remove(backup)) {
+        // Jangan hapus backup sebelum memastikan file aktif valid.
+        if (validateQueueFile(path, isEvent)) {
+
+            if (!LittleFS.remove(backup)) {
+                Serial.println(
+                    "[OFFLINE] WARNING: backup lama belum terhapus."
+                );
+            }
+
+        } else if (validateQueueFile(backup, isEvent)) {
+
             Serial.println(
-                "[OFFLINE] WARNING: backup lama belum terhapus."
+                "[OFFLINE] WARNING: file aktif rusak; memulihkan backup."
             );
-        }
-    }
 
+            if (!LittleFS.remove(path)) {
+                Serial.println(
+                    "[OFFLINE] ERROR: file aktif rusak tidak dapat dipindahkan."
+                );
+                return false;
+            }
+
+            if (!LittleFS.rename(backup, path)) {
+                Serial.println(
+                    "[OFFLINE] ERROR: backup valid gagal dipulihkan."
+                );
+                return false;
+            }
+
+        } else {
+
+            // Kedua salinan dipertahankan untuk investigasi manual.
+            Serial.println(
+                "[OFFLINE] ERROR: file aktif dan backup sama-sama tidak valid."
+            );
+            return false;
+        }
+
+    }
+    // Jika hanya file aktif yang tersedia, biarkan proses recovery
+    // di bawah menangani legacy record atau interrupted append terakhir.
+
+    // TEMP bukan sumber data utama. Setelah path/backup dipilih,
+    // temp yang tersisa dari proses terputus boleh dibuang.
     if (LittleFS.exists(temp)) {
         if (!LittleFS.remove(temp)) {
             Serial.println(
                 "[OFFLINE] ERROR: temporary file tidak dapat dihapus."
             );
-
             return false;
         }
     }
@@ -1160,6 +1255,37 @@ bool offlineStorageEnqueue(
 
             return false;
         }
+    }
+
+    // Compaction membuat salinan sementara sebelum file lama diganti.
+    // Sisakan ruang minimal sebesar antrean terbesar + margin agar
+    // ACK/remove tidak gagal hanya karena LittleFS kehabisan ruang.
+    const size_t telemetryBytes = queueSize(TELEMETRY_FILE);
+    const size_t eventBytes = queueSize(EVENT_FILE);
+
+    const size_t projectedTelemetry =
+        telemetryBytes + (isEvent ? 0 : serialized.length());
+
+    const size_t projectedEvents =
+        eventBytes + (isEvent ? serialized.length() : 0);
+
+    const size_t projectedUsed = used + serialized.length();
+    const size_t projectedFree =
+        (projectedUsed <= total) ? (total - projectedUsed) : 0;
+
+    const size_t largestQueue =
+        (projectedTelemetry > projectedEvents)
+            ? projectedTelemetry
+            : projectedEvents;
+
+    const size_t compactionMargin =
+        (total / 20 > 1024) ? (total / 20) : 1024;
+
+    if (projectedFree < largestQueue + compactionMargin) {
+        Serial.println(
+            "[OFFLINE] ERROR: ruang cadangan compaction tidak mencukupi."
+        );
+        return false;
     }
 
     // Append-only: tidak menulis ulang seluruh antrean.
