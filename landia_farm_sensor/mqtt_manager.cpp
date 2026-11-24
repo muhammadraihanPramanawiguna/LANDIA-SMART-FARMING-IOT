@@ -30,7 +30,7 @@
 
 // Pertahankan alamat broker dari konfigurasi kamu.
 // Pastikan alamat ini memang dapat dijangkau ESP32.
-const char* MQTT_SERVER = "192.168.0.190";
+const char* MQTT_SERVER = "192.168.0.234";
 const uint16_t MQTT_PORT = 1883;
 
 const char* MQTT_CLIENT_ID = "landia-esp32-01";
@@ -485,81 +485,77 @@ bool queueTelemetrySet(
         Serial.println("[SENSOR] Flow tidak valid, dilewati.");
     }
 
-    // ========================================================
-    // 5. WATER LEVEL SENSOR
-    // ========================================================
+ 
 
-    if (waterLevel.valid &&
-        isfinite(waterLevel.waterLevelPercent)) {
+// ========================================================
+// 5. WATER LEVEL SENSOR
+// ========================================================
 
-        if (!generateRecordId(recordId, sizeof(recordId))) {
-            allSaved = false;
+if (
+    waterLevel.valid &&
+    isfinite(waterLevel.distanceCm) &&
+    waterLevel.distanceCm >= 0.0f &&
+    isfinite(waterLevel.waterLevelPercent) &&
+    waterLevel.waterLevelPercent >= 0.0f &&
+    waterLevel.waterLevelPercent <= 100.0f
+) {
+    if (!generateRecordId(recordId, sizeof(recordId))) {
+        allSaved = false;
+    } else {
+        if (timestamp.length() > 0) {
+            length = snprintf(
+                payload,
+                sizeof(payload),
+                "{"
+                "\"recordId\":\"%s\","
+                "\"deviceId\":\"%s\","
+                "\"sensorId\":\"landia-water-level-01\","
+                "\"value\":%.2f,"
+                "\"unit\":\"cm\","
+                "\"recordedAt\":\"%s\""
+                "}",
+                recordId,
+                DEVICE_ID,
+                waterLevel.distanceCm,
+                timestamp.c_str()
+            );
         } else {
-
-            if (timestamp.length() > 0) {
-
-                length = snprintf(
-                    payload,
-                    sizeof(payload),
-                    "{"
-                    "\"recordId\":\"%s\","
-                    "\"deviceId\":\"%s\","
-                    "\"sensorId\":\"landia-water-level-01\","
-                    "\"value\":%.2f,"
-                    "\"unit\":\"%%\","
-                    "\"recordedAt\":\"%s\""
-                    "}",
-                    recordId,
-                    DEVICE_ID,
-                    waterLevel.waterLevelPercent,
-                    timestamp.c_str()
-                );
-
-            } else {
-
-                length = snprintf(
-                    payload,
-                    sizeof(payload),
-                    "{"
-                    "\"recordId\":\"%s\","
-                    "\"deviceId\":\"%s\","
-                    "\"sensorId\":\"landia-water-level-01\","
-                    "\"value\":%.2f,"
-                    "\"unit\":\"%%\""
-                    "}",
-                    recordId,
-                    DEVICE_ID,
-                    waterLevel.waterLevelPercent
-                );
-            }
-
-            if (length <= 0 ||
-                length >= (int)sizeof(payload) ||
-                !enqueueSensorPayload(
-                    TOPIC_WATER_LEVEL,
-                    payload,
-                    recordId
-                )) {
-                allSaved = false;
-            }
+            length = snprintf(
+                payload,
+                sizeof(payload),
+                "{"
+                "\"recordId\":\"%s\","
+                "\"deviceId\":\"%s\","
+                "\"sensorId\":\"landia-water-level-01\","
+                "\"value\":%.2f,"
+                "\"unit\":\"cm\""
+                "}",
+                recordId,
+                DEVICE_ID,
+                waterLevel.distanceCm
+            );
         }
 
-    } else {
-        Serial.println("[SENSOR] Water level tidak valid, dilewati.");
+        if (
+            length <= 0 ||
+            length >= (int)sizeof(payload) ||
+            !enqueueSensorPayload(
+                TOPIC_WATER_LEVEL,
+                payload,
+                recordId
+            )
+        ) {
+            allSaved = false;
+        }
     }
-
-    if (allSaved) {
-        Serial.println(
-            "[OFFLINE] Seluruh telemetry valid berhasil diproses."
-        );
-    } else {
-        Serial.println(
-            "[OFFLINE] Ada telemetry yang gagal disimpan."
-        );
-    }
-
-    return allSaved;
+} else {
+    Serial.println(
+        "[SENSOR] Water level tidak valid, dilewati."
+    );
 }
+    return allSaved;
+}  // Penutup fungsi queueTelemetrySet()
+
 
 // ------------------------------------------------------------
 // APPLICATION ACK CALLBACK

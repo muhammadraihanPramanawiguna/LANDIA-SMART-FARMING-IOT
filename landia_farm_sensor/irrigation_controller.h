@@ -62,12 +62,24 @@ bool irrigationIsActive();
 IrrigationState irrigationGetState();
 
 // =====================================================
-// SESSION DATA
+// SESSION STATISTICS
 // =====================================================
 
+// Volume sesi yang sedang berjalan atau sesi terakhir.
 float irrigationGetSessionLitres();
 
+// Biaya sesi yang sedang berjalan atau sesi terakhir.
 float irrigationGetSessionCost();
+
+// =====================================================
+// DAILY STATISTICS
+// =====================================================
+
+// Total volume irigasi pada hari berjalan.
+float irrigationGetDailyLitres();
+
+// Total biaya irigasi pada hari berjalan.
+float irrigationGetDailyCost();
 
 // =====================================================
 // MANUAL SAFETY STOP
@@ -75,4 +87,4 @@ float irrigationGetSessionCost();
 
 void irrigationEmergencyStop();
 
-#endif // IRRIGATION_CONTROLLER_H
+#endif // LANDIA_IRRIGATION_CONTROLLER_H

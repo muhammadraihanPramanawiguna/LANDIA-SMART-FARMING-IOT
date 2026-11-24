@@ -64,10 +64,12 @@ RTCData rtcData;
 // Local control tetap berjalan ketika MQTT/WiFi mati.
 // =====================================================
 
-const unsigned long TELEMETRY_INTERVAL = 30000UL;
+#ifndef TELEMETRY_MAX_INTERVAL_MS
+#define TELEMETRY_MAX_INTERVAL_MS 300000UL
+#endif
 
-unsigned long lastTelemetryMillis = 0;
-
+const unsigned long TELEMETRY_INTERVAL =
+    TELEMETRY_MAX_INTERVAL_MS;
 
 // =====================================================
 // SETUP
