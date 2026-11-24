@@ -128,7 +128,7 @@
 // 0.0 = tarif belum dikonfigurasi.
 // Ubah sesuai tarif aktual Landia Farm.
 
-#define WATER_TARIFF_PER_M3 0.0f
+#define WATER_TARIFF_PER_M3 1000.0f
 
 // Konversi satuan volume.
 #define LITERS_PER_CUBIC_METER 1000.0f

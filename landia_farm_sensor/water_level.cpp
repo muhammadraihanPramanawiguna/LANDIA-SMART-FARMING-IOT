@@ -13,7 +13,7 @@
 static constexpr int JSN_FILTER_SAMPLES = 5;
 
 // Minimum jumlah sampel valid yang dibutuhkan.
-static constexpr int JSN_MIN_VALID_SAMPLES = 3;
+static constexpr int JSN_MIN_VALID_SAMPLES = 2;
 
 // Jarak minimum pembacaan JSN-SR04M.
 // Perlu disesuaikan dengan varian sensor yang digunakan.
@@ -222,10 +222,23 @@ float readFilteredDistanceCm() {
             isfinite(distance) &&
             distance >= JSN_MIN_VALID_DISTANCE_CM
         ) {
-
             samples[validSamples] = distance;
-
             validSamples++;
+
+            Serial.printf(
+                "[JSN] Sample %d: VALID %.2f cm (%d/%d valid)\\n",
+                i + 1,
+                distance,
+                validSamples,
+                JSN_FILTER_SAMPLES
+            );
+        } else {
+            Serial.printf(
+                "[JSN] Sample %d: INVALID (%d/%d valid)\\n",
+                i + 1,
+                validSamples,
+                JSN_FILTER_SAMPLES
+            );
         }
 
         // Jeda antar pembacaan.
@@ -240,9 +253,12 @@ float readFilteredDistanceCm() {
         validSamples < JSN_MIN_VALID_SAMPLES
     ) {
 
-        Serial.print("[JSN] Insufficient valid samples: ");
-
-        Serial.println(validSamples);
+        Serial.printf(
+            "[JSN] Insufficient valid samples: %d/%d (minimum %d)\\n",
+            validSamples,
+            JSN_FILTER_SAMPLES,
+            JSN_MIN_VALID_SAMPLES
+        );
 
         return -1.0f;
     }
@@ -258,19 +274,18 @@ float readFilteredDistanceCm() {
 
     // -------------------------------------------------
     // CALCULATE MEDIAN
+    // For an even number of valid samples, average the two
+    // middle values. Two valid samples are accepted to handle
+    // intermittent echo readings while the sensor is repositioned.
     // -------------------------------------------------
 
     const int middle = validSamples / 2;
 
     if (validSamples % 2 == 1) {
-
         return samples[middle];
     }
 
-    return (
-        samples[middle - 1] +
-        samples[middle]
-    ) / 2.0f;
+    return (samples[middle - 1] + samples[middle]) / 2.0f;
 }
 
 

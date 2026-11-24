@@ -157,6 +157,7 @@ bool normalizeTelemetryPayload(const OfflineRecord& record,
     hasValue |= copyNumeric(telemetry, "water_consumption_m3", source, "water_consumption_m3");
     hasValue |= copyNumeric(telemetry, "water_cost_rupiah", source, "water_cost_rupiah");
     hasValue |= copyNumeric(telemetry, "water_tariff_rupiah_per_m3", source, "water_tariff_rupiah_per_m3");
+    hasValue |= copyNumeric(telemetry, "water_tariff_rupiah_per_m3", source, "water_tariff_rupiah_per_m3");
     hasValue |= copyNumeric(telemetry, "water_level_distance_cm", source, "water_level_distance_cm");
     hasValue |= copyNumeric(telemetry, "water_level_percent", source, "water_level_percent");
 
