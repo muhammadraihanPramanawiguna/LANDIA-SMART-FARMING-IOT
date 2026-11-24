@@ -424,7 +424,7 @@ static void showWaterPage(
     // LINE 2
     // =================================================
 
-    if (WATER_COST_PER_LITER > 0.0f) {
+    if (WATER_TARIFF_PER_M3 > 0.0f) {
 
         snprintf(
             line2,

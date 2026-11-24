@@ -134,6 +134,21 @@
 #define LITERS_PER_CUBIC_METER 1000.0f
 
 // =====================================================
+// THINGSBOARD MQTT CONFIGURATION
+// =====================================================
+
+// Endpoint yang sudah diuji langsung pada server Landia Farm.
+#define THINGSBOARD_MQTT_HOST "194.233.73.154"
+#define THINGSBOARD_MQTT_PORT 1883
+#define THINGSBOARD_MQTT_TOPIC "esp/telemetry"
+#define THINGSBOARD_MQTT_QOS 1
+
+// Interval koneksi ulang MQTT/Wi-Fi.
+#define WIFI_RECONNECT_INTERVAL_MS 10000UL
+#define MQTT_RECONNECT_INTERVAL_MS 10000UL
+#define MQTT_BACKLOG_SEND_INTERVAL_MS 500UL
+
+// =====================================================
 // TELEMETRY CONFIGURATION
 // =====================================================
 

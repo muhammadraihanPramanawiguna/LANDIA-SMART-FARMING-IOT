@@ -71,6 +71,10 @@ RTCData rtcData;
 const unsigned long TELEMETRY_INTERVAL =
     TELEMETRY_MAX_INTERVAL_MS;
 
+// Waktu pengiriman telemetry terakhir. Diatur agar snapshot pertama
+// dapat diantrekan setelah sensor mulai memberikan data valid.
+unsigned long lastTelemetryMillis = 0;
+
 // =====================================================
 // SETUP
 // =====================================================
@@ -174,6 +178,10 @@ void setup()
     Serial.println("[SYSTEM] Initializing MQTT manager...");
 
     mqttInit();
+
+    // Mulai hitung interval telemetry setelah inisialisasi selesai.
+    // Sensor akan lebih dahulu memperoleh pembacaan valid dari scheduler.
+    lastTelemetryMillis = millis();
 
 
     // =================================================

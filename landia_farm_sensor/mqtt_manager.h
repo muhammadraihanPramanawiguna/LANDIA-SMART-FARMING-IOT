@@ -10,8 +10,9 @@
 #include "water_level.h"
 #include "rtc_manager.h"
 
-// MQTT hanya menangani komunikasi. Kontrol irigasi tetap lokal di ESP32.
-// Wi-Fi/MQTT/ACK tidak boleh menjadi syarat scheduler atau relay bekerja.
+// Komunikasi MQTT ThingsBoard. Kontrol irigasi tetap lokal.
+// mqttUpdate() hanya mengelola antrean dan status koneksi;
+// tidak menunggu Wi-Fi/broker secara sinkron.
 
 void mqttInit();
 void mqttUpdate();
@@ -19,7 +20,6 @@ void mqttUpdate();
 bool mqttIsConnected();
 bool wifiIsConnected();
 
-// Menyimpan telemetry valid ke LittleFS; mqttUpdate mengirim antreannya.
 void mqttPublishTelemetry(
     const DHTData &dht,
     const SoilData &soil,
@@ -29,8 +29,8 @@ void mqttPublishTelemetry(
     const RTCData &rtc
 );
 
-// Menyimpan event irigasi ke antrean event LittleFS.
-// Pengiriman menunggu backend memiliki consumer dan application ACK event.
+// Event irigasi disimpan ke antrean event LittleFS.
+// Belum dipublikasikan sampai schema/consumer event dikonfirmasi.
 void mqttPublishIrrigationEvent(
     const char *event,
     const char *state,
