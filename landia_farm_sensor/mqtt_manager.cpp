@@ -157,7 +157,6 @@ bool normalizeTelemetryPayload(const OfflineRecord& record,
     hasValue |= copyNumeric(telemetry, "water_consumption_m3", source, "water_consumption_m3");
     hasValue |= copyNumeric(telemetry, "water_cost_rupiah", source, "water_cost_rupiah");
     hasValue |= copyNumeric(telemetry, "water_tariff_rupiah_per_m3", source, "water_tariff_rupiah_per_m3");
-    hasValue |= copyNumeric(telemetry, "water_tariff_rupiah_per_m3", source, "water_tariff_rupiah_per_m3");
     hasValue |= copyNumeric(telemetry, "water_level_distance_cm", source, "water_level_distance_cm");
     hasValue |= copyNumeric(telemetry, "water_level_percent", source, "water_level_percent");
 
@@ -285,6 +284,9 @@ if (level.valid &&
     }
     payload[length] = '\0';
 
+    Serial.printf("[MQTT][TELEMETRY] Snapshot payload (%u bytes): %s\\n",
+                  static_cast<unsigned int>(length), payload);
+
     char recordId[41];
     if (!offlineStorageGenerateRecordId(recordId, sizeof(recordId))) {
         Serial.println("[OFFLINE] Failed to generate telemetry record ID.");
@@ -384,6 +386,7 @@ void publishOneQueuedTelemetry() {
                   record.recordId.c_str(),
                   TELEMETRY_TOPIC,
                   THINGSBOARD_MQTT_QOS);
+    Serial.printf("[MQTT] Payload sent: %s\\n", normalizedPayload);
 }
 
 // ------------------------------------------------------------

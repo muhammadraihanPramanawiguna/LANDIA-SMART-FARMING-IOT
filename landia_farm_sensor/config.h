@@ -154,7 +154,7 @@
 
 // Interval maksimum pembaruan telemetry.
 // Perubahan signifikan dapat dikirim lebih cepat.
-#define TELEMETRY_MAX_INTERVAL_MS 300000UL
+#define TELEMETRY_MAX_INTERVAL_MS 15000UL // 15 detik untuk verifikasi ThingsBoard
 
 // Interval pembacaan sensor tetap diatur
 // terpisah dari interval pengiriman telemetry.
