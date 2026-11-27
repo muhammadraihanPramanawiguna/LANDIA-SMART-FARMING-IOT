@@ -105,11 +105,17 @@
 // FLOW SENSOR SAFETY
 // =====================================================
 
-// Waktu toleransi setelah pompa ON.
-#define FLOW_STARTUP_GRACE_MS 5000UL
+// Startup flow detection timeout: waktu maksimal mendeteksi
+// aliran pertama setelah pompa dinyalakan.
+#define FLOW_STARTUP_DETECTION_TIMEOUT_MS 12000UL
 
-// Aliran minimum yang dianggap terdeteksi.
-#define FLOW_MIN_DETECTED_LPM 0.10f
+// Flow-loss timeout: jika flow yang sebelumnya terdeteksi
+// hilang selama durasi ini, pompa akan dimatikan.
+#define FLOW_LOSS_TIMEOUT_MS 5000UL
+
+// Ambang flow untuk mengabaikan noise / pembacaan kecil.
+// Nilai awal ini perlu divalidasi saat tes aliran air aktual.
+#define FLOW_MIN_DETECTED_LPM 0.30f
 
 // =====================================================
 // FLOW SENSOR CALIBRATION

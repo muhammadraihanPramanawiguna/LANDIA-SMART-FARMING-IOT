@@ -65,6 +65,15 @@ static bool flowBaselineInitialized = false;
 
 static unsigned long lastFlowDetectionMillis = 0;
 
+// true sampai flow pertama berhasil terdeteksi.
+static bool flowStartupPending = false;
+
+// Waktu awal fase startup.
+static unsigned long flowStartupStartedMillis = 0;
+
+// Menghindari log startup berulang setiap update.
+static bool flowStartupLogPrinted = false;
+
 // =====================================================
 // DAILY SCHEDULE
 // =====================================================
@@ -430,6 +439,10 @@ void irrigationInit() {
 
     lastFlowDetectionMillis = 0;
 
+flowStartupPending = false;
+flowStartupStartedMillis = 0;
+flowStartupLogPrinted = false;
+
     scheduleHandledToday = false;
     lastScheduleDateKey = -1;
 
@@ -728,12 +741,20 @@ static void startIrrigation(
     lastSessionLitres = 0.0f;
     lastSessionCost = 0.0f;
 
-    irrigationStartMillis = millis();
+irrigationStartMillis = millis();
 
-    lastFlowDetectionMillis =
-        irrigationStartMillis;
+lastFlowDetectionMillis =
+    irrigationStartMillis;
 
-    irrigationActive = true;
+// Mulai fase startup flow detection.
+flowStartupPending = true;
+
+flowStartupStartedMillis =
+    irrigationStartMillis;
+
+flowStartupLogPrinted = false;
+
+irrigationActive = true;
 
     irrigationState = IRRIGATION_IRRIGATING;
 
@@ -820,6 +841,10 @@ static void stopIrrigation(
     // -------------------------------------------------
 
     irrigationActive = false;
+
+    flowStartupPending = false;
+    flowStartupStartedMillis = 0;
+    flowStartupLogPrinted = false;
 
     irrigationState = finalState;
 
@@ -1016,42 +1041,88 @@ void irrigationUpdate(
         }
 
         // ---------------------------------------------
-        // FLOW DETECTION
+        // FLOW DETECTION + STARTUP / FLOW-LOSS PROTECTION
         // ---------------------------------------------
 
-        if (
-            flow.flowRateLMin >=
-            FLOW_MIN_DETECTED_LPM
-        ) {
+        const unsigned long now = millis();
 
-            lastFlowDetectionMillis = millis();
+        const bool flowDetected =
+            flow.flowRateLMin >= FLOW_MIN_DETECTED_LPM;
 
+        // PHASE A: STARTUP FLOW DETECTION
+        // Pompa baru aktif; tunggu flow pertama.
+        if (flowStartupPending) {
+
+            if (flowDetected) {
+
+                flowStartupPending = false;
+                lastFlowDetectionMillis = now;
+
+                Serial.print("[IRRIGATION] Flow detected: ");
+                Serial.print(flow.flowRateLMin, 2);
+                Serial.println(" L/min -> normal flow monitoring enabled");
+
+            } else {
+
+                if (!flowStartupLogPrinted) {
+                    Serial.println(
+                        "[IRRIGATION] Startup phase: waiting for flow pulses"
+                    );
+                    flowStartupLogPrinted = true;
+                }
+
+                if (
+                    now - flowStartupStartedMillis >=
+                    FLOW_STARTUP_DETECTION_TIMEOUT_MS
+                ) {
+
+                    stopIrrigation(
+                        IRRIGATION_FLOW_ERROR,
+                        flow,
+                        rtc
+                    );
+
+                    Serial.println(
+                        "[IRRIGATION] Startup flow timeout -> PUMP OFF"
+                    );
+
+                    return;
+                }
+            }
         }
 
-        // ---------------------------------------------
-        // NO FLOW PROTECTION
-        // ---------------------------------------------
+        // PHASE B: NORMAL FLOW MONITORING
+        // Flow pernah terdeteksi; jika hilang, matikan pompa.
+        else {
 
-        if (
-            millis() - lastFlowDetectionMillis >=
-            FLOW_STARTUP_GRACE_MS
-        ) {
+            if (flowDetected) {
+                lastFlowDetectionMillis = now;
+            }
 
-            stopIrrigation(
-                IRRIGATION_FLOW_ERROR,
-                flow,
-                rtc
-            );
+            if (
+                now - lastFlowDetectionMillis >=
+                FLOW_LOSS_TIMEOUT_MS
+            ) {
 
-            Serial.println(
-                "[IRRIGATION] No flow detected -> PUMP OFF"
-            );
+                stopIrrigation(
+                    IRRIGATION_FLOW_ERROR,
+                    flow,
+                    rtc
+                );
 
-            return;
+                Serial.println(
+                    "[IRRIGATION] Flow lost -> PUMP OFF"
+                );
+
+                return;
+            }
         }
 
         // ---------------------------------------------
         // SOIL TARGET
+        // ---------------------------------------------
+
+        
         // ---------------------------------------------
 
         if (
@@ -1337,6 +1408,10 @@ void irrigationEmergencyStop() {
             );
 
         irrigationActive = false;
+
+        flowStartupPending = false;
+        flowStartupStartedMillis = 0;
+        flowStartupLogPrinted = false;
 
         irrigationState =
             IRRIGATION_TIMEOUT;
