@@ -10,10 +10,8 @@
 #include "water_level.h"
 #include "rtc_manager.h"
 
-// Komunikasi MQTT ThingsBoard. Kontrol irigasi tetap lokal.
-// mqttUpdate() hanya mengelola antrean dan status koneksi;
-// tidak menunggu Wi-Fi/broker secara sinkron.
-
+// MQTT ThingsBoard. Kontrol irigasi tetap lokal.
+// mqttUpdate() bersifat non-blocking terhadap proses reconnect.
 void mqttInit();
 void mqttUpdate();
 
@@ -29,8 +27,7 @@ void mqttPublishTelemetry(
     const RTCData &rtc
 );
 
-// Event irigasi disimpan ke antrean event LittleFS.
-// Belum dipublikasikan sampai schema/consumer event dikonfirmasi.
+// Event irigasi masih disimpan lokal sampai schema event server dikonfirmasi.
 void mqttPublishIrrigationEvent(
     const char *event,
     const char *state,

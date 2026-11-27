@@ -17,23 +17,43 @@ static unsigned long lastLCD = 0;
 static unsigned long lastSerial = 0;
 
 // =====================================================
+// SCHEDULER STATUS
+// =====================================================
+
+static bool schedulerInitialized = false;
+
+// =====================================================
 // INTERNAL SCHEDULER HELPER
 // =====================================================
 
-// Memeriksa apakah interval sudah terpenuhi.
+// Memeriksa apakah interval eksekusi telah terpenuhi.
+//
 // Menggunakan unsigned subtraction agar aman terhadap
 // overflow millis().
 //
-// Jika proses terlambat, jadwal berikutnya dihitung
-// dari waktu eksekusi aktual. Tidak ada catch-up burst.
+// Jika proses terlambat:
+// - Tidak melakukan catch-up burst.
+// - Eksekusi berikutnya dihitung dari waktu aktual.
+//
+// Interval 0 tidak diperbolehkan.
 
 static bool schedulerIsDue(
     unsigned long &lastExecution,
     unsigned long interval,
     unsigned long currentTime
 ) {
+
+    // Proteksi interval tidak valid.
+    if (interval == 0UL) {
+        return false;
+    }
+
+    // Periksa apakah interval sudah terpenuhi.
     if (currentTime - lastExecution >= interval) {
+
+        // Update waktu eksekusi aktual.
         lastExecution = currentTime;
+
         return true;
     }
 
@@ -46,7 +66,11 @@ static bool schedulerIsDue(
 
 void schedulerInit() {
 
-    unsigned long now = millis();
+    const unsigned long now = millis();
+
+    // -------------------------------------------------
+    // SENSOR SCHEDULER
+    // -------------------------------------------------
 
     lastDHT = now;
     lastSoil = now;
@@ -54,9 +78,16 @@ void schedulerInit() {
     lastFlow = now;
     lastWaterLevel = now;
 
+    // -------------------------------------------------
+    // SYSTEM SCHEDULER
+    // -------------------------------------------------
+
     lastRTC = now;
     lastLCD = now;
     lastSerial = now;
+
+    // Scheduler baru boleh digunakan setelah init.
+    schedulerInitialized = true;
 }
 
 // =====================================================
@@ -65,46 +96,84 @@ void schedulerInit() {
 
 bool schedulerDHT() {
 
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
+
     return schedulerIsDue(
         lastDHT,
         DHT_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
+// -----------------------------------------------------
+
 bool schedulerSoil() {
+
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
 
     return schedulerIsDue(
         lastSoil,
         SOIL_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
+// -----------------------------------------------------
+
 bool schedulerRain() {
+
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
 
     return schedulerIsDue(
         lastRain,
         RAIN_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
+// -----------------------------------------------------
+
 bool schedulerFlow() {
+
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
 
     return schedulerIsDue(
         lastFlow,
         FLOW_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
+// -----------------------------------------------------
+
 bool schedulerWaterLevel() {
+
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
 
     return schedulerIsDue(
         lastWaterLevel,
         WATER_LEVEL_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
@@ -114,27 +183,49 @@ bool schedulerWaterLevel() {
 
 bool schedulerRTC() {
 
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
+
     return schedulerIsDue(
         lastRTC,
         RTC_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
+// -----------------------------------------------------
+
 bool schedulerLCD() {
+
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
 
     return schedulerIsDue(
         lastLCD,
         LCD_INTERVAL_MS,
-        millis()
+        now
     );
 }
 
+// -----------------------------------------------------
+
 bool schedulerSerial() {
+
+    if (!schedulerInitialized) {
+        return false;
+    }
+
+    const unsigned long now = millis();
 
     return schedulerIsDue(
         lastSerial,
         SERIAL_INTERVAL_MS,
-        millis()
+        now
     );
 }

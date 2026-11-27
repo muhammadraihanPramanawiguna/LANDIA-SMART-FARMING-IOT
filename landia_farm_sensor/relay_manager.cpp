@@ -7,8 +7,8 @@
 // RELAY STATE
 // =====================================================
 
-// Ini adalah state perintah dari ESP32, bukan feedback
-// fisik dari kontak relay.
+// State perintah dari ESP32,
+// bukan feedback fisik dari kontak relay.
 static bool relayState = false;
 
 
@@ -30,10 +30,12 @@ static constexpr uint8_t RELAY_OFF_LEVEL =
 void relayInit() {
 
     // Set output latch ke OFF sebelum pin menjadi OUTPUT.
-    // Untuk kondisi sebelum setup(), tetap gunakan pull-up
-    // hardware pada input relay active-low.
+    // Kondisi sebelum setup() tetap membutuhkan
+    // pull-up/pull-down hardware yang sesuai.
     digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
+
     pinMode(RELAY_PIN, OUTPUT);
+
     digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
 
     relayState = false;
@@ -54,6 +56,7 @@ void relayOn() {
     }
 
     digitalWrite(RELAY_PIN, RELAY_ON_LEVEL);
+
     relayState = true;
 
     Serial.println("[RELAY] Pump command: ON");
@@ -66,7 +69,7 @@ void relayOn() {
 
 void relayOff() {
 
-    // Tetap tulis OFF sebagai tindakan fail-safe,
+    // Selalu tulis OFF sebagai tindakan fail-safe,
     // meskipun state software sudah OFF.
     digitalWrite(RELAY_PIN, RELAY_OFF_LEVEL);
 

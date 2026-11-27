@@ -202,6 +202,12 @@ static void sortDistances(
 
 float readFilteredDistanceCm() {
 
+    // Fungsi ini juga dapat dipanggil langsung, jadi validasi
+    // konfigurasi tetap dilakukan di sini.
+    if (!isValidWaterLevelConfig()) {
+        return -1.0f;
+    }
+
     float samples[JSN_FILTER_SAMPLES];
 
     int validSamples = 0;
@@ -220,7 +226,8 @@ float readFilteredDistanceCm() {
 
         if (
             isfinite(distance) &&
-            distance >= JSN_MIN_VALID_DISTANCE_CM
+            distance >= JSN_MIN_VALID_DISTANCE_CM &&
+            validSamples < JSN_FILTER_SAMPLES
         ) {
             samples[validSamples] = distance;
             validSamples++;
@@ -241,8 +248,10 @@ float readFilteredDistanceCm() {
             );
         }
 
-        // Jeda antar pembacaan.
-        delay(JSN_SAMPLE_INTERVAL_MS);
+        // Jeda hanya di antara sampel, bukan setelah sampel terakhir.
+        if (i < JSN_FILTER_SAMPLES - 1) {
+            delay(JSN_SAMPLE_INTERVAL_MS);
+        }
     }
 
     // -------------------------------------------------

@@ -167,6 +167,14 @@ static void flowPersistenceUpdate() {
         return;
     }
 
+    // Jika total RAM lebih kecil dari checkpoint sebelumnya,
+    // kemungkinan terjadi reset total yang belum tersimpan.
+    // Hindari unsigned underflow pada perhitungan selisih.
+    if (currentPulseSnapshot < lastPersistedPulseCount) {
+        persistTotalPulseCount(true);
+        return;
+    }
+
     // Hitung pertambahan pulsa sejak checkpoint terakhir.
     const uint64_t pulseDifference =
         currentPulseSnapshot - lastPersistedPulseCount;
@@ -510,12 +518,24 @@ FlowData flowRead() {
 
     data.totalLitres = static_cast<float>(totalLitres);
 
-    data.totalCubicMeter =
-        data.totalLitres / LITERS_PER_CUBIC_METER;
+    // Hindari pembagian dengan konstanta volume yang invalid.
+    if (
+        isfinite(LITERS_PER_CUBIC_METER) &&
+        LITERS_PER_CUBIC_METER > 0.0f
+    ) {
+        data.totalCubicMeter =
+            data.totalLitres / LITERS_PER_CUBIC_METER;
+    } else {
+        data.totalCubicMeter = 0.0f;
+    }
 
-    // Biaya berdasarkan tarif Rp/m3.
-    data.totalCost =
-        data.totalCubicMeter * WATER_TARIFF_PER_M3;
+    // Biaya hanya dihitung jika konfigurasi tarif valid.
+    if (isValidWaterTariff()) {
+        data.totalCost =
+            data.totalCubicMeter * WATER_TARIFF_PER_M3;
+    } else {
+        data.totalCost = 0.0f;
+    }
 
     data.valid = flowDataValid;
 
@@ -543,6 +563,11 @@ void flowResetTotal() {
     portEXIT_CRITICAL(&flowMux);
 
     lastPulseCount = 0;
+
+    // Reset baseline checkpoint juga agar tidak terjadi
+    // unsigned underflow setelah reset total.
+    lastPersistedPulseCount = 0;
+    lastPersistMillis = millis();
 
     // -------------------------------------------------
     // RESET MEASUREMENT

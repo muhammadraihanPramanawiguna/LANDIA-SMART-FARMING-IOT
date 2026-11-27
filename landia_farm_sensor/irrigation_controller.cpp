@@ -20,6 +20,7 @@ static const char* KEY_LAST_SESSION_L = "session_l";
 static const char* KEY_LAST_SESSION_COST = "session_cost";
 static const char* KEY_SESSION_ACTIVE = "session_active";
 static const char* KEY_SESSION_START_L = "session_start";
+static const char* KEY_SCHEDULE_HANDLED_DATE = "sched_done_date";
 
 static Preferences irrigationPreferences;
 
@@ -80,6 +81,7 @@ static bool flowStartupLogPrinted = false;
 
 static bool scheduleHandledToday = false;
 static long lastScheduleDateKey = -1;
+static bool previousSessionInterrupted = false;
 
 // =====================================================
 // LOW WATER LOG CONTROL
@@ -169,6 +171,17 @@ static long getDateKey(const RTCData& rtc) {
         (rtc.year * 10000L) +
         (rtc.month * 100L) +
         rtc.day;
+}
+
+// Simpan tanggal jadwal yang sudah selesai/di-skip agar reboot
+// tidak memicu penyiraman kedua pada hari yang sama.
+static void persistScheduleHandledDate(long dateKey) {
+    if (irrigationStorageReady) {
+        irrigationPreferences.putLong(
+            KEY_SCHEDULE_HANDLED_DATE,
+            dateKey
+        );
+    }
 }
 
 // =====================================================
@@ -445,6 +458,7 @@ flowStartupLogPrinted = false;
 
     scheduleHandledToday = false;
     lastScheduleDateKey = -1;
+    previousSessionInterrupted = false;
 
     lowWaterLogged = false;
 
@@ -487,6 +501,8 @@ flowStartupLogPrinted = false;
             );
 
         if (previousSessionActive) {
+
+            previousSessionInterrupted = true;
 
             const float previousStartLitres =
                 irrigationPreferences.getFloat(
@@ -549,6 +565,8 @@ flowStartupLogPrinted = false;
                 dailyIrrigationLitres
             );
 
+        // Status schedule dipulihkan setelah tanggal RTC diketahui
+        // di irrigationUpdate(), bukan langsung di sini.
         lastDailyPersistLitres =
             dailyIrrigationLitres;
 
@@ -613,9 +631,28 @@ void irrigationNotifyTimeCorrection(
         lastScheduleDateKey =
             correctedDateKey;
 
-        scheduleHandledToday = false;
+        const long persistedHandledDate =
+            irrigationStorageReady
+                ? irrigationPreferences.getLong(
+                    KEY_SCHEDULE_HANDLED_DATE,
+                    -1
+                )
+                : -1;
 
-        irrigationState = IRRIGATION_IDLE;
+        scheduleHandledToday =
+            (persistedHandledDate == correctedDateKey);
+
+        if (previousSessionInterrupted) {
+            scheduleHandledToday = true;
+            persistScheduleHandledDate(correctedDateKey);
+            previousSessionInterrupted = false;
+        }
+
+        // Jangan mengubah state sesi yang sedang berjalan.
+        // Koreksi tanggal hanya mereset status jadwal.
+        if (!irrigationActive) {
+            irrigationState = IRRIGATION_IDLE;
+        }
 
     }
 
@@ -667,11 +704,33 @@ static bool isWithinScheduleWindow(
         lastScheduleDateKey =
             currentDateKey;
 
-        scheduleHandledToday = false;
+        const long persistedHandledDate =
+            irrigationStorageReady
+                ? irrigationPreferences.getLong(
+                    KEY_SCHEDULE_HANDLED_DATE,
+                    -1
+                )
+                : -1;
+
+        scheduleHandledToday =
+            (persistedHandledDate == currentDateKey);
+
+        // Jika reboot memutus sesi pompa, jangan otomatis mulai
+        // sesi kedua pada hari itu: kondisi tanah/air saat restart
+        // belum tentu sama dengan kondisi sebelum reboot.
+        if (previousSessionInterrupted) {
+            scheduleHandledToday = true;
+            persistScheduleHandledDate(currentDateKey);
+            previousSessionInterrupted = false;
+        }
 
         lowWaterLogged = false;
 
-        irrigationState = IRRIGATION_IDLE;
+        if (!irrigationActive) {
+            irrigationState = scheduleHandledToday
+                ? IRRIGATION_SKIPPED
+                : IRRIGATION_IDLE;
+        }
 
         Serial.println(
             "[IRRIGATION] New day - Schedule reset"
@@ -703,6 +762,7 @@ static bool isWithinScheduleWindow(
     }
 
     scheduleHandledToday = true;
+    persistScheduleHandledDate(currentDateKey);
 
     irrigationState = IRRIGATION_SKIPPED;
 
@@ -850,6 +910,9 @@ static void stopIrrigation(
 
     if (finalState != IRRIGATION_LOW_WATER) {
         scheduleHandledToday = true;
+        if (rtc.valid) {
+            persistScheduleHandledDate(getDateKey(rtc));
+        }
     }
 
     // -------------------------------------------------
@@ -1205,10 +1268,11 @@ void irrigationUpdate(
 
     if (
         soil.moisturePercent >=
-        SOIL_IRRIGATION_START_PERCENT
+        SOIL_IRRIGATION_STOP_PERCENT
     ) {
 
         scheduleHandledToday = true;
+        persistScheduleHandledDate(getDateKey(rtc));
 
         irrigationState =
             IRRIGATION_SKIPPED;
@@ -1290,7 +1354,7 @@ void irrigationUpdate(
 
     if (
         soil.moisturePercent <
-        SOIL_IRRIGATION_START_PERCENT
+        SOIL_IRRIGATION_STOP_PERCENT
     ) {
 
         startIrrigation(
@@ -1417,6 +1481,9 @@ void irrigationEmergencyStop() {
             IRRIGATION_TIMEOUT;
 
         scheduleHandledToday = true;
+        if (lastScheduleDateKey >= 0) {
+            persistScheduleHandledDate(lastScheduleDateKey);
+        }
 
         if (irrigationStorageReady) {
 

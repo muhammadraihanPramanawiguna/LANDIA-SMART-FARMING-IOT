@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <math.h>
 
 // =====================================================
 // CONFIGURATION
@@ -348,50 +349,45 @@ void loop() {
 
     if (schedulerLCD())
     {
-        if (
-            dhtData.valid &&
-            soilData.valid &&
-            rainData.valid &&
-            flowData.valid &&
-            waterLevelData.valid
-        )
-        {
-            lcdUpdate(
+        // LCD tetap diperbarui meskipun salah satu sensor invalid.
+        // Sensor invalid dikirim sebagai NAN agar LCD menampilkan "--".
+        // Sensor lain yang valid tetap dapat ditampilkan.
 
-                // DHT
-                dhtData.temperature,
-                dhtData.humidity,
+        lcdUpdate(
 
-                // SOIL
-                soilData.moisturePercent,
+            // DHT
+            dhtData.valid ? dhtData.temperature : NAN,
+            dhtData.valid ? dhtData.humidity : NAN,
 
-                // RAIN
-                rainData.rainPercent,
+            // SOIL
+            soilData.valid ? soilData.moisturePercent : NAN,
 
-                // FLOW
-                flowData.flowRateLMin,
-                flowData.totalLitres,
+            // RAIN
+            rainData.valid ? rainData.rainPercent : NAN,
 
-                // WATER LEVEL
-                waterLevelData.waterLevelPercent,
+            // FLOW
+            flowData.valid ? flowData.flowRateLMin : NAN,
+            flowData.valid ? flowData.totalLitres : NAN,
 
-                // IRRIGATION SESSION
-                irrigationGetSessionLitres(),
-                irrigationGetSessionCost(),
+            // WATER LEVEL
+            waterLevelData.valid ? waterLevelData.waterLevelPercent : NAN,
 
-                // RELAY
-                relayIsOn(),
+            // IRRIGATION SESSION
+            irrigationGetSessionLitres(),
+            irrigationGetSessionCost(),
 
-                // IRRIGATION
-                irrigationIsActive(),
+            // RELAY
+            relayIsOn(),
 
-                // RTC
-                rtcData.valid,
-                rtcData.hour,
-                rtcData.minute,
-                rtcData.second
-            );
-        }
+            // IRRIGATION
+            irrigationIsActive(),
+
+            // RTC
+            rtcData.valid,
+            rtcData.hour,
+            rtcData.minute,
+            rtcData.second
+        );
     }
 
 

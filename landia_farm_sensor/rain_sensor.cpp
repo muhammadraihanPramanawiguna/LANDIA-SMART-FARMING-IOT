@@ -1,4 +1,3 @@
-
 #include "rain_sensor.h"
 #include "config.h"
 
@@ -9,7 +8,7 @@
 // ESP32 ADC default range: 0 - 4095.
 static constexpr int RAIN_ADC_MAX = 4095;
 
-// Jumlah sampel untuk mengurangi noise pembacaan.
+// Jumlah sampel untuk mengurangi noise.
 static constexpr int RAIN_SAMPLE_COUNT = 5;
 
 // Threshold sementara.

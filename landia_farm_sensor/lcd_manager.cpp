@@ -1,3 +1,4 @@
+
 #include "lcd_manager.h"
 
 #include <Arduino.h>
@@ -9,6 +10,7 @@
 
 #include "config.h"
 
+
 // =====================================================
 // LCD OBJECT
 // =====================================================
@@ -19,13 +21,14 @@ static LiquidCrystal_I2C lcd(
     LCD_ROWS
 );
 
+
 // =====================================================
 // LCD CONFIGURATION
 // =====================================================
 
 static const uint8_t LCD_PAGE_COUNT = 3;
-
 static const uint8_t LCD_LINE_LENGTH = 16;
+
 
 // =====================================================
 // PAGE STATE
@@ -35,11 +38,21 @@ static uint8_t currentPage = 0;
 
 static bool lcdInitialized = false;
 
+
 // =====================================================
-// LCD LINE BUFFER
+// LCD LINE CACHE
 // =====================================================
 
-static char lineBuffer[17];
+// Cache menyimpan tampilan terakhir pada masing-masing baris.
+// Tujuannya:
+// - Menghindari penulisan LCD berulang jika teks tidak berubah.
+// - Mengurangi flicker.
+// - Tetap menulis seluruh 16 karakter ketika baris berubah.
+
+static char lcdLineCache[LCD_ROWS][LCD_LINE_LENGTH + 1];
+
+static bool lcdLineCacheValid[LCD_ROWS];
+
 
 // =====================================================
 // HELPER: VALIDATE FLOAT
@@ -49,6 +62,7 @@ static bool lcdIsValidNumber(float value) {
 
     return isfinite(value);
 }
+
 
 // =====================================================
 // HELPER: FORMAT FLOAT
@@ -108,24 +122,39 @@ static void lcdFormatFloat(
     }
 }
 
+
 // =====================================================
 // HELPER: PRINT FIXED LCD LINE
 // =====================================================
 
-// Setiap baris selalu dibatasi 16 karakter.
-// Sisa kolom diisi spasi agar tidak ada teks lama
-// yang tertinggal ketika isi baris berubah.
+// Setiap baris:
+// 1. Diisi spasi sebanyak 16 karakter.
+// 2. Konten dimasukkan tanpa NULL-padding.
+// 3. Dibandingkan dengan cache.
+// 4. Jika berubah, seluruh 16 karakter ditulis.
+//
+// Dengan cara ini karakter dari halaman sebelumnya
+// tidak akan tertinggal.
 
 static void lcdPrintLine(
     uint8_t row,
     const char* content
 ) {
 
-    if (!lcdInitialized) {
+    if (
+        !lcdInitialized ||
+        row >= LCD_ROWS
+    ) {
         return;
     }
 
+
     char buffer[LCD_LINE_LENGTH + 1];
+
+
+    // =================================================
+    // FILL BUFFER WITH SPACES
+    // =================================================
 
     memset(
         buffer,
@@ -135,19 +164,84 @@ static void lcdPrintLine(
 
     buffer[LCD_LINE_LENGTH] = '\0';
 
+
+    // =================================================
+    // COPY CONTENT WITHOUT NULL PADDING
+    // =================================================
+
     if (content != nullptr) {
 
-        strncpy(
+        size_t contentLength = strlen(content);
+
+        if (contentLength > LCD_LINE_LENGTH) {
+
+            contentLength = LCD_LINE_LENGTH;
+        }
+
+        memcpy(
             buffer,
             content,
-            LCD_LINE_LENGTH
+            contentLength
         );
     }
 
-    lcd.setCursor(0, row);
 
-    lcd.print(buffer);
+    // =================================================
+    // CHECK CACHE
+    // =================================================
+
+    if (
+        lcdLineCacheValid[row] &&
+        memcmp(
+            buffer,
+            lcdLineCache[row],
+            LCD_LINE_LENGTH
+        ) == 0
+    ) {
+
+        // Tidak ada perubahan.
+        // Tidak perlu menulis ulang LCD.
+
+        return;
+    }
+
+
+    // =================================================
+    // UPDATE CACHE
+    // =================================================
+
+    memcpy(
+        lcdLineCache[row],
+        buffer,
+        LCD_LINE_LENGTH
+    );
+
+    lcdLineCache[row][LCD_LINE_LENGTH] = '\0';
+
+    lcdLineCacheValid[row] = true;
+
+
+    // =================================================
+    // WRITE EXACTLY 16 CHARACTERS
+    // =================================================
+
+    lcd.setCursor(
+        0,
+        row
+    );
+
+    for (
+        uint8_t column = 0;
+        column < LCD_LINE_LENGTH;
+        column++
+    ) {
+
+        lcd.write(
+            static_cast<uint8_t>(buffer[column])
+        );
+    }
 }
+
 
 // =====================================================
 // HELPER: PRINT TIME
@@ -193,6 +287,32 @@ static void lcdFormatTime(
     );
 }
 
+
+// =====================================================
+// HELPER: RESET LCD CACHE
+// =====================================================
+
+static void lcdResetCache() {
+
+    for (
+        uint8_t row = 0;
+        row < LCD_ROWS;
+        row++
+    ) {
+
+        memset(
+            lcdLineCache[row],
+            ' ',
+            LCD_LINE_LENGTH
+        );
+
+        lcdLineCache[row][LCD_LINE_LENGTH] = '\0';
+
+        lcdLineCacheValid[row] = false;
+    }
+}
+
+
 // =====================================================
 // INITIALIZATION
 // =====================================================
@@ -201,17 +321,21 @@ void lcdInit() {
 
     lcdInitialized = false;
 
+    currentPage = 0;
+
+    lcdResetCache();
+
+
     // =================================================
-    // I2C BUS
+    // I2C
     // =================================================
 
-    // Wire.begin() tidak dipanggil lagi di sini.
+    // Wire.begin() tidak dipanggil kembali di sini.
     //
-    // rtcInit() sudah menginisialisasi I2C:
-    // SDA = GPIO21
-    // SCL = GPIO22
+    // RTC sudah menginisialisasi bus I2C.
     //
-    // LCD dan RTC menggunakan bus I2C yang sama.
+    // LCD dan RTC menggunakan bus yang sama.
+
 
     // =================================================
     // INITIALIZE LCD
@@ -223,7 +347,9 @@ void lcdInit() {
 
     lcd.clear();
 
+
     lcdInitialized = true;
+
 
     // =================================================
     // STARTUP DISPLAY
@@ -239,9 +365,18 @@ void lcdInit() {
         "SYSTEM START..."
     );
 
+
     delay(1500);
 
+
+    // =================================================
+    // CLEAR DISPLAY
+    // =================================================
+
     lcd.clear();
+
+    lcdResetCache();
+
 
     // =================================================
     // RESET PAGE
@@ -249,14 +384,28 @@ void lcdInit() {
 
     currentPage = 0;
 
+
+    // =================================================
+    // SERIAL
+    // =================================================
+
     Serial.println(
         "[LCD] LCD initialized"
+    );
+
+    Serial.println(
+        "[LCD] 16-character line refresh enabled"
+    );
+
+    Serial.println(
+        "[LCD] Line cache enabled"
     );
 
     Serial.println(
         "[LCD] I2C bus shared with RTC"
     );
 }
+
 
 // =====================================================
 // PAGE 1
@@ -278,6 +427,7 @@ static void showEnvironmentPage(
 
     char line1[32];
     char line2[32];
+
 
     // =================================================
     // FORMAT SENSOR DATA
@@ -311,6 +461,7 @@ static void showEnvironmentPage(
         0
     );
 
+
     // =================================================
     // LINE 1
     // =================================================
@@ -322,6 +473,7 @@ static void showEnvironmentPage(
         temperatureText,
         humidityText
     );
+
 
     // =================================================
     // LINE 2
@@ -335,6 +487,11 @@ static void showEnvironmentPage(
         rainText
     );
 
+
+    // =================================================
+    // DISPLAY
+    // =================================================
+
     lcdPrintLine(
         0,
         line1
@@ -345,6 +502,7 @@ static void showEnvironmentPage(
         line2
     );
 }
+
 
 // =====================================================
 // PAGE 2
@@ -368,6 +526,7 @@ static void showWaterPage(
 
     char line1[32];
     char line2[32];
+
 
     // =================================================
     // FORMAT SENSOR DATA
@@ -408,6 +567,7 @@ static void showWaterPage(
         0
     );
 
+
     // =================================================
     // LINE 1
     // =================================================
@@ -419,6 +579,7 @@ static void showWaterPage(
         flowText,
         waterText
     );
+
 
     // =================================================
     // LINE 2
@@ -445,6 +606,11 @@ static void showWaterPage(
         );
     }
 
+
+    // =================================================
+    // DISPLAY
+    // =================================================
+
     lcdPrintLine(
         0,
         line1
@@ -455,6 +621,7 @@ static void showWaterPage(
         line2
     );
 }
+
 
 // =====================================================
 // PAGE 3
@@ -475,6 +642,7 @@ static void showSystemPage(
 
     char timeText[9];
 
+
     // =================================================
     // LINE 1
     // =================================================
@@ -486,6 +654,7 @@ static void showSystemPage(
         pumpOn ? "ON" : "OFF",
         irrigationActive ? "ON" : "OFF"
     );
+
 
     // =================================================
     // LINE 2
@@ -517,6 +686,11 @@ static void showSystemPage(
         );
     }
 
+
+    // =================================================
+    // DISPLAY
+    // =================================================
+
     lcdPrintLine(
         0,
         line1
@@ -527,6 +701,7 @@ static void showSystemPage(
         line2
     );
 }
+
 
 // =====================================================
 // MAIN LCD UPDATE
@@ -559,8 +734,10 @@ void lcdUpdate(
 ) {
 
     if (!lcdInitialized) {
+
         return;
     }
+
 
     // =================================================
     // PAGE 1: ENVIRONMENT
@@ -575,6 +752,7 @@ void lcdUpdate(
             rainPercent
         );
     }
+
 
     // =================================================
     // PAGE 2: WATER
@@ -591,6 +769,7 @@ void lcdUpdate(
         );
     }
 
+
     // =================================================
     // PAGE 3: SYSTEM
     // =================================================
@@ -606,6 +785,7 @@ void lcdUpdate(
             second
         );
     }
+
 
     // =================================================
     // NEXT PAGE

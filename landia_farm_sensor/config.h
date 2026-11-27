@@ -72,18 +72,45 @@
 // IRRIGATION SCHEDULE
 // =====================================================
 
-// Jadwal penyiraman menggunakan RTC lokal.
+// Penyiraman hanya boleh dimulai ketika jadwal tiba.
+// Jadwal menggunakan waktu RTC lokal (WIB).
+
 #define IRRIGATION_SCHEDULE_HOUR 9
 #define IRRIGATION_SCHEDULE_MINUTE 0
+
+// Toleransi waktu eksekusi jadwal.
+// Controller harus memastikan jadwal tidak dieksekusi
+// berulang kali dalam satu hari.
 #define IRRIGATION_MAX_DELAY_MINUTES 10
 
 // =====================================================
 // SOIL MOISTURE CONFIGURATION
 // =====================================================
 
+// Batas indikator tanah kering.
+// Nilai ini merupakan indikator kondisi tanah,
+// bukan trigger penyiraman di luar jadwal.
 #define SOIL_MOISTURE_DRY_THRESHOLD_PERCENT 30.0f
 
-#define SOIL_IRRIGATION_START_PERCENT 85.0f
+// =====================================================
+// SCHEDULED IRRIGATION TARGET
+// =====================================================
+
+// Target kelembapan tanah.
+//
+// Logika yang diharapkan:
+// 1. Tunggu jadwal penyiraman.
+// 2. Ketika jadwal tiba, periksa soil moisture.
+// 3. Jika moisture >= target, penyiraman dilewati.
+// 4. Jika moisture < target, penyiraman dimulai.
+// 5. Pompa berjalan hingga moisture mencapai target.
+// 6. Setelah mencapai target, pompa OFF.
+// 7. Tunggu jadwal penyiraman berikutnya.
+//
+// Moisture di bawah target TIDAK boleh menjadi trigger
+// penyiraman sebelum jadwal tiba.
+
+#define SOIL_IRRIGATION_START_PERCENT 30.0f
 #define SOIL_IRRIGATION_STOP_PERCENT 85.0f
 
 // =====================================================
@@ -99,22 +126,30 @@
 // =====================================================
 
 // Durasi maksimum satu sesi irigasi: 5 menit.
+//
+// Safety timeout untuk mencegah pompa bekerja
+// terlalu lama apabila target kelembapan tidak tercapai.
 #define IRRIGATION_MAX_RUNTIME_MS 300000UL
 
 // =====================================================
 // FLOW SENSOR SAFETY
 // =====================================================
 
-// Startup flow detection timeout: waktu maksimal mendeteksi
-// aliran pertama setelah pompa dinyalakan.
+// Startup flow detection timeout:
+// waktu maksimal mendeteksi aliran pertama
+// setelah pompa dinyalakan.
 #define FLOW_STARTUP_DETECTION_TIMEOUT_MS 12000UL
 
-// Flow-loss timeout: jika flow yang sebelumnya terdeteksi
-// hilang selama durasi ini, pompa akan dimatikan.
+// Flow-loss timeout:
+// jika flow yang sebelumnya terdeteksi hilang
+// selama durasi ini, pompa akan dimatikan.
 #define FLOW_LOSS_TIMEOUT_MS 5000UL
 
-// Ambang flow untuk mengabaikan noise / pembacaan kecil.
-// Nilai awal ini perlu divalidasi saat tes aliran air aktual.
+// Ambang flow untuk mengabaikan noise
+// atau pembacaan aliran sangat kecil.
+//
+// Nilai ini perlu divalidasi pada sistem drip
+// Landia Farm dengan pompa dan jalur aktual.
 #define FLOW_MIN_DETECTED_LPM 0.30f
 
 // =====================================================
@@ -123,7 +158,8 @@
 
 // Nilai awal kalibrasi ZJ-S201.
 // Satuan: pulsa per liter.
-// WAJIB divalidasi menggunakan pengukuran volume aktual.
+//
+// WAJIB divalidasi menggunakan volume air aktual.
 #define FLOW_CALIBRATION_FACTOR 450.0f
 
 // =====================================================
@@ -131,9 +167,9 @@
 // =====================================================
 
 // Tarif air dalam Rupiah per meter kubik (m3).
+// Nilai ini harus disesuaikan dengan tarif aktual.
+//
 // 0.0 = tarif belum dikonfigurasi.
-// Ubah sesuai tarif aktual Landia Farm.
-
 #define WATER_TARIFF_PER_M3 1000.0f
 
 // Konversi satuan volume.
@@ -143,15 +179,24 @@
 // THINGSBOARD MQTT CONFIGURATION
 // =====================================================
 
-// Endpoint yang sudah diuji langsung pada server Landia Farm.
+// Endpoint yang sudah diuji langsung
+// pada server Landia Farm.
 #define THINGSBOARD_MQTT_HOST "194.233.73.154"
 #define THINGSBOARD_MQTT_PORT 1883
 #define THINGSBOARD_MQTT_TOPIC "esp/telemetry"
 #define THINGSBOARD_MQTT_QOS 1
 
-// Interval koneksi ulang MQTT/Wi-Fi.
+// =====================================================
+// WIFI & MQTT RECONNECT CONFIGURATION
+// =====================================================
+
+// Interval koneksi ulang Wi-Fi.
 #define WIFI_RECONNECT_INTERVAL_MS 10000UL
+
+// Interval koneksi ulang MQTT.
 #define MQTT_RECONNECT_INTERVAL_MS 10000UL
+
+// Interval pengiriman backlog MQTT.
 #define MQTT_BACKLOG_SEND_INTERVAL_MS 500UL
 
 // =====================================================
@@ -160,10 +205,10 @@
 
 // Interval maksimum pembaruan telemetry.
 // Perubahan signifikan dapat dikirim lebih cepat.
-#define TELEMETRY_MAX_INTERVAL_MS 15000UL // 15 detik untuk verifikasi ThingsBoard
+#define TELEMETRY_MAX_INTERVAL_MS 15000UL
 
-// Interval pembacaan sensor tetap diatur
-// terpisah dari interval pengiriman telemetry.
+// Interval pembacaan sensor diatur oleh scheduler
+// dan tidak bergantung pada interval telemetry.
 
 // =====================================================
 // OFFLINE STORAGE CONFIGURATION
@@ -176,7 +221,6 @@
 #define BACKLOG_SEND_INTERVAL_MS 500UL
 
 // Batas waktu menunggu konfirmasi pengiriman.
-// Mekanisme ACK akan disesuaikan dengan ThingsBoard.
 #define ACK_TIMEOUT_INTERVAL_MS 10000UL
 
 // =====================================================

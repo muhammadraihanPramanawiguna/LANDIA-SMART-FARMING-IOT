@@ -1,4 +1,3 @@
-
 #ifndef LANDIA_RELAY_MANAGER_H
 #define LANDIA_RELAY_MANAGER_H
 

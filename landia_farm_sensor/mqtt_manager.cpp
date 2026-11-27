@@ -13,18 +13,10 @@
 
 // ============================================================
 // LANDIA FARM - THINGSBOARD MQTT MANAGER
-//
-// MQTT endpoint: 194.233.73.154:1883
-// Topic        : esp/telemetry (terbukti pada server aktual)
-// Authentication: Device Access Token sebagai MQTT username
-// QoS          : 1
-//
-// Telemetry disimpan lebih dahulu ke LittleFS. Record baru dihapus
-// setelah callback onPublish menerima PUBACK dari broker.
-//
-// Catatan: PUBACK membuktikan broker menerima publish QoS 1,
-// bukan bukti transaksi database ThingsBoard. Verifikasi Latest
-// Telemetry tetap dilakukan di dashboard.
+// ============================================================
+// Endpoint, topic, token, dan QoS tetap mengikuti config.h/secrets.h.
+// Telemetry masuk LittleFS terlebih dahulu.
+// Record dihapus hanya setelah PUBACK QoS 1 yang sesuai diterima.
 // ============================================================
 
 #if !defined(WIFI_SSID) || !defined(WIFI_PASSWORD)
@@ -40,6 +32,10 @@ namespace {
 constexpr char MQTT_CLIENT_ID[] = "landia-esp32-01";
 constexpr char TELEMETRY_TOPIC[] = THINGSBOARD_MQTT_TOPIC;
 constexpr size_t TELEMETRY_PAYLOAD_SIZE = 480;
+constexpr size_t EVENT_PAYLOAD_SIZE = 256;
+
+// ACK timeout internal. Record tidak dihapus saat timeout.
+constexpr unsigned long MQTT_ACK_TIMEOUT_MS = 10000UL;
 
 espMqttClient mqttClient;
 
@@ -48,39 +44,61 @@ bool wifiStarted = false;
 bool wifiWasConnected = false;
 bool mqttConnectPending = false;
 
-volatile bool mqttConnectedEvent = false;
-volatile bool mqttDisconnectedEvent = false;
-volatile uint16_t lastPublishAckPacketId = 0;
+// Callback library berjalan di task internal. Akses status callback
+// dilindungi critical section agar task utama membaca snapshot konsisten.
+portMUX_TYPE mqttEventMux = portMUX_INITIALIZER_UNLOCKED;
+bool mqttConnectedEvent = false;
+bool mqttDisconnectedEvent = false;
+uint16_t lastPublishAckPacketId = 0;
 
 unsigned long lastWifiAttempt = 0;
 unsigned long lastMqttAttempt = 0;
 unsigned long lastBacklogSend = 0;
-unsigned long lastConnectionLog = 0;
+unsigned long inFlightStartedAt = 0;
 
 String inFlightRecordId;
 uint16_t inFlightPacketId = 0;
 
 // ------------------------------------------------------------
-// MQTT EVENT CALLBACKS
-// Callback library berjalan pada task internal espMqttClient.
-// Operasi LittleFS dilakukan di mqttUpdate(), bukan di callback.
+// MQTT CALLBACKS
 // ------------------------------------------------------------
 
 void onMqttConnect(bool sessionPresent) {
     (void)sessionPresent;
+
+    portENTER_CRITICAL(&mqttEventMux);
     mqttConnectedEvent = true;
     mqttDisconnectedEvent = false;
+    portEXIT_CRITICAL(&mqttEventMux);
 }
 
 void onMqttDisconnect(espMqttClientTypes::DisconnectReason reason) {
     (void)reason;
+
+    portENTER_CRITICAL(&mqttEventMux);
     mqttDisconnectedEvent = true;
     mqttConnectedEvent = false;
+    portEXIT_CRITICAL(&mqttEventMux);
 }
 
 void onMqttPublish(uint16_t packetId) {
-    // Callback ini menandakan PUBACK untuk publish QoS 1.
+    portENTER_CRITICAL(&mqttEventMux);
     lastPublishAckPacketId = packetId;
+    portEXIT_CRITICAL(&mqttEventMux);
+}
+
+void consumeMqttEvents(bool &connectedEvent,
+                       bool &disconnectedEvent,
+                       uint16_t &ackPacketId) {
+    portENTER_CRITICAL(&mqttEventMux);
+    connectedEvent = mqttConnectedEvent;
+    disconnectedEvent = mqttDisconnectedEvent;
+    ackPacketId = lastPublishAckPacketId;
+
+    mqttConnectedEvent = false;
+    mqttDisconnectedEvent = false;
+    lastPublishAckPacketId = 0;
+    portEXIT_CRITICAL(&mqttEventMux);
 }
 
 // ------------------------------------------------------------
@@ -101,6 +119,7 @@ void ensureWiFi() {
     mqttConnectPending = false;
 
     const unsigned long now = millis();
+
     if (!wifiStarted ||
         now - lastWifiAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
         wifiStarted = true;
@@ -112,35 +131,49 @@ void ensureWiFi() {
 }
 
 // ------------------------------------------------------------
-// PAYLOAD NORMALIZATION
-//
-// Payload baru sudah berupa telemetry ThingsBoard.
-// Record LittleFS lama dari versi backend sebelumnya dinormalisasi
-// agar hanya key telemetry yang dikenal yang dikirim ke esp/telemetry.
-// Record yang tidak dikenali tidak dihapus otomatis.
+// JSON NUMERIC VALIDATION
 // ------------------------------------------------------------
 
-bool copyNumeric(JsonDocument& destination,
-                 const char* destinationKey,
-                 JsonDocument& source,
-                 const char* sourceKey) {
+bool copyNumeric(JsonDocument &destination,
+                 const char *destinationKey,
+                 JsonDocument &source,
+                 const char *sourceKey) {
     JsonVariantConst value = source[sourceKey];
-    if (value.isNull() || !value.is<float>()) return false;
+
+    if (value.isNull() || !value.is<float>()) {
+        return false;
+    }
+
     const float number = value.as<float>();
-    if (!isfinite(number)) return false;
+
+    if (!isfinite(number)) {
+        return false;
+    }
+
     destination[destinationKey] = number;
     return true;
 }
 
-bool normalizeTelemetryPayload(const OfflineRecord& record,
-                               char* output,
-                               size_t outputSize) {
-    if (output == nullptr || outputSize == 0) return false;
+// ------------------------------------------------------------
+// LEGACY PAYLOAD NORMALIZATION
+// ------------------------------------------------------------
+// Record lama din queue dinormalisasi ke schema telemetry yang
+// dikenal. Payload tidak dikenal tidak dihapus otomatis.
+// ------------------------------------------------------------
+
+bool normalizeTelemetryPayload(const OfflineRecord &record,
+                              char *output,
+                              size_t outputSize) {
+    if (output == nullptr || outputSize == 0) {
+        return false;
+    }
 
     JsonDocument source;
     DeserializationError error = deserializeJson(source, record.payload);
+
     if (error) {
-        Serial.printf("[MQTT] Legacy payload JSON invalid: %s\n",
+        Serial.printf("[MQTT] Legacy JSON invalid (%s): %s\n",
+                      record.recordId.c_str(),
                       error.c_str());
         return false;
     }
@@ -160,8 +193,9 @@ bool normalizeTelemetryPayload(const OfflineRecord& record,
     hasValue |= copyNumeric(telemetry, "water_level_distance_cm", source, "water_level_distance_cm");
     hasValue |= copyNumeric(telemetry, "water_level_percent", source, "water_level_percent");
 
-    // Record dari firmware backend lama memakai sensorId + value.
-    const char* sensorId = source["sensorId"] | "";
+    // Payload versi lama memakai sensorId + value.
+    const char *sensorId = source["sensorId"] | "";
+
     if (strcmp(sensorId, "landia-soil-01") == 0) {
         hasValue |= copyNumeric(telemetry, "soil_moisture", source, "value");
     } else if (strcmp(sensorId, "landia-rain-01") == 0) {
@@ -172,37 +206,41 @@ bool normalizeTelemetryPayload(const OfflineRecord& record,
         hasValue |= copyNumeric(telemetry, "water_level_distance_cm", source, "value");
     }
 
-    // is_raining disimpan sebagai boolean ThingsBoard.
     if (!source["is_raining"].isNull()) {
         telemetry["is_raining"] = source["is_raining"].as<bool>();
         hasValue = true;
     }
 
     if (!hasValue) {
-        Serial.printf("[MQTT] Record %s tidak memiliki key telemetry yang dikenali. "
-                      "Record dipertahankan.\n",
+        Serial.printf("[MQTT] Record %s has no recognized telemetry keys. "
+                      "Record retained.\n",
                       record.recordId.c_str());
         return false;
     }
 
     const size_t written = serializeJson(telemetry, output, outputSize);
-    if (written == 0 || written >= outputSize) return false;
+
+    if (written == 0 || written >= outputSize) {
+        return false;
+    }
+
     output[written] = '\0';
     return true;
 }
 
 // ------------------------------------------------------------
-// ENQUEUE ONE COMBINED SENSOR SNAPSHOT
+// ENQUEUE SENSOR SNAPSHOT
 // ------------------------------------------------------------
 
-bool enqueueTelemetrySnapshot(const DHTData& dht,
-                              const SoilData& soil,
-                              const RainData& rain,
-                              const FlowData& flow,
-                              const WaterLevelData& level) {
+bool enqueueTelemetrySnapshot(const DHTData &dht,
+                             const SoilData &soil,
+                             const RainData &rain,
+                             const FlowData &flow,
+                             const WaterLevelData &level) {
     JsonDocument telemetry;
     bool hasValue = false;
 
+    // DHT: hanya dimasukkan bila kedua nilai valid.
     if (dht.valid &&
         isfinite(dht.temperature) &&
         isfinite(dht.humidity)) {
@@ -228,9 +266,8 @@ bool enqueueTelemetrySnapshot(const DHTData& dht,
         telemetry["flow_rate"] = flow.flowRateLMin;
         telemetry["total_water_liters"] = flow.totalLitres;
 
-        // Volume dan biaya dihitung lokal oleh flow_sensor.cpp.
-        // Satuan biaya adalah Rupiah; tarif dikonfigurasi dalam Rp/m3.
-        if (isfinite(flow.totalCubicMeter) && flow.totalCubicMeter >= 0.0f) {
+        if (isfinite(flow.totalCubicMeter) &&
+            flow.totalCubicMeter >= 0.0f) {
             telemetry["water_consumption_m3"] = flow.totalCubicMeter;
         }
 
@@ -240,36 +277,24 @@ bool enqueueTelemetrySnapshot(const DHTData& dht,
 
         if (isfinite(static_cast<float>(WATER_TARIFF_PER_M3)) &&
             WATER_TARIFF_PER_M3 >= 0.0f) {
-            telemetry["water_tariff_rupiah_per_m3"] = WATER_TARIFF_PER_M3;
+            telemetry["water_tariff_rupiah_per_m3"] =
+                WATER_TARIFF_PER_M3;
         }
 
         hasValue = true;
     }
 
-// WATER LEVEL - JSN-SR04M
-Serial.printf(
-    "[MQTT][WATER] valid=%d | distance=%.2f cm | level=%.2f%%\n",
-    level.valid,
-    level.distanceCm,
-    level.waterLevelPercent
-);
-
-if (level.valid &&
-    isfinite(level.distanceCm) &&
-    isfinite(level.waterLevelPercent) &&
-    level.distanceCm >= 0.0f &&
-    level.waterLevelPercent >= 0.0f &&
-    level.waterLevelPercent <= 100.0f) {
-
-    telemetry["water_level_distance_cm"] = level.distanceCm;
-    telemetry["water_level_percent"] = level.waterLevelPercent;
-
-    hasValue = true;
-
-    Serial.println("[MQTT][WATER] Water level masuk payload.");
-} else {
-    Serial.println("[MQTT][WATER] Data tidak valid, tidak dimasukkan.");
-}
+    // Water level
+    if (level.valid &&
+        isfinite(level.distanceCm) &&
+        isfinite(level.waterLevelPercent) &&
+        level.distanceCm >= 0.0f &&
+        level.waterLevelPercent >= 0.0f &&
+        level.waterLevelPercent <= 100.0f) {
+        telemetry["water_level_distance_cm"] = level.distanceCm;
+        telemetry["water_level_percent"] = level.waterLevelPercent;
+        hasValue = true;
+    }
 
     if (!hasValue) {
         Serial.println("[MQTT] No valid sensor values; snapshot not queued.");
@@ -277,42 +302,48 @@ if (level.valid &&
     }
 
     char payload[TELEMETRY_PAYLOAD_SIZE];
-    const size_t length = serializeJson(telemetry, payload, sizeof(payload));
+
+    const size_t length = serializeJson(
+        telemetry,
+        payload,
+        sizeof(payload)
+    );
+
     if (length == 0 || length >= sizeof(payload)) {
-        Serial.println("[MQTT] Telemetry payload exceeds buffer; not queued.");
+        Serial.println("[MQTT] Payload exceeds buffer; snapshot not queued.");
         return false;
     }
+
     payload[length] = '\0';
 
-    Serial.printf("[MQTT][TELEMETRY] Snapshot payload (%u bytes): %s\\n",
-                  static_cast<unsigned int>(length), payload);
-
     char recordId[41];
+
     if (!offlineStorageGenerateRecordId(recordId, sizeof(recordId))) {
         Serial.println("[OFFLINE] Failed to generate telemetry record ID.");
         return false;
     }
 
-    if (!offlineStorageEnqueue(recordId,
-                               TELEMETRY_TOPIC,
-                               payload,
-                               false)) {
+    if (!offlineStorageEnqueue(
+            recordId,
+            TELEMETRY_TOPIC,
+            payload,
+            false)) {
         Serial.println("[OFFLINE] Failed to enqueue telemetry snapshot.");
         return false;
     }
 
     Serial.printf("[OFFLINE] Telemetry queued: %s (%u bytes)\n",
-                  recordId, (unsigned int)length);
+                  recordId,
+                  static_cast<unsigned int>(length));
+
     return true;
 }
 
 // ------------------------------------------------------------
-// PROCESS BROKER PUBACK
+// PROCESS PUBACK
 // ------------------------------------------------------------
 
-void processPublishAck() {
-    const uint16_t ackId = lastPublishAckPacketId;
-
+void processPublishAck(uint16_t ackId) {
     if (ackId == 0 ||
         inFlightPacketId == 0 ||
         ackId != inFlightPacketId ||
@@ -321,20 +352,54 @@ void processPublishAck() {
     }
 
     if (offlineStorageRemove(inFlightRecordId.c_str())) {
-        Serial.printf("[MQTT] PUBACK received. Queue record removed: %s\n",
+        Serial.printf("[MQTT] PUBACK received. Record removed: %s\n",
                       inFlightRecordId.c_str());
+
         inFlightRecordId = "";
         inFlightPacketId = 0;
-        lastPublishAckPacketId = 0;
+        inFlightStartedAt = 0;
     } else {
-        Serial.printf("[OFFLINE] PUBACK received, but failed to remove %s. "
-                      "Will retry removal.\n",
+        Serial.printf("[OFFLINE] PUBACK received but record removal failed: %s. "
+                      "Record will remain in storage.\n",
                       inFlightRecordId.c_str());
+
+        // Record tetap dipertahankan. Jangan menganggap delivery selesai.
+        inFlightRecordId = "";
+        inFlightPacketId = 0;
+        inFlightStartedAt = 0;
     }
 }
 
 // ------------------------------------------------------------
-// SEND ONE QUEUED RECORD
+// ACK TIMEOUT
+// ------------------------------------------------------------
+
+void processAckTimeout() {
+    if (inFlightPacketId == 0 || inFlightStartedAt == 0) {
+        return;
+    }
+
+    const unsigned long now = millis();
+
+    if (now - inFlightStartedAt < MQTT_ACK_TIMEOUT_MS) {
+        return;
+    }
+
+    Serial.printf("[MQTT] PUBACK timeout for record %s. "
+                  "Record retained for retry.\n",
+                  inFlightRecordId.c_str());
+
+    // Jangan menghapus record. Reset state agar record yang sama
+    // dapat di-publish ulang. QoS 1 memungkinkan duplicate delivery.
+    inFlightRecordId = "";
+    inFlightPacketId = 0;
+    inFlightStartedAt = 0;
+
+    lastBacklogSend = now;
+}
+
+// ------------------------------------------------------------
+// SEND ONE QUEUED TELEMETRY RECORD
 // ------------------------------------------------------------
 
 void publishOneQueuedTelemetry() {
@@ -345,22 +410,30 @@ void publishOneQueuedTelemetry() {
     }
 
     const unsigned long now = millis();
-    if (now - lastBacklogSend < MQTT_BACKLOG_SEND_INTERVAL_MS) return;
+
+    if (now - lastBacklogSend < MQTT_BACKLOG_SEND_INTERVAL_MS) {
+        return;
+    }
 
     OfflineRecord record;
-    if (!offlineStoragePeekTelemetry(record)) return;
+
+    if (!offlineStoragePeekTelemetry(record)) {
+        return;
+    }
 
     if (record.isEvent) {
-        Serial.println("[MQTT] Event record found in telemetry queue; "
-                       "sending stopped for safety.");
+        Serial.println("[MQTT] Event record detected in telemetry queue. "
+                       "Publish stopped to protect event data.");
         return;
     }
 
     char normalizedPayload[TELEMETRY_PAYLOAD_SIZE];
-    if (!normalizeTelemetryPayload(record,
-                                   normalizedPayload,
-                                   sizeof(normalizedPayload))) {
-        // Do not delete unknown or malformed records automatically.
+
+    if (!normalizeTelemetryPayload(
+            record,
+            normalizedPayload,
+            sizeof(normalizedPayload))) {
+        // Record malformed/unknown tetap disimpan untuk investigasi.
         return;
     }
 
@@ -372,36 +445,38 @@ void publishOneQueuedTelemetry() {
     );
 
     if (packetId == 0) {
-        Serial.println("[MQTT] Publish enqueue failed; LittleFS record retained.");
+        Serial.println("[MQTT] Publish enqueue failed. Record retained.");
         lastBacklogSend = now;
         return;
     }
 
     inFlightRecordId = record.recordId;
     inFlightPacketId = packetId;
+    inFlightStartedAt = now;
     lastBacklogSend = now;
 
-    Serial.printf("[MQTT] PUBLISH queued: packetId=%u | record=%s | topic=%s | QoS=%d\n",
+    Serial.printf("[MQTT] Publish started. packetId=%u | record=%s\n",
                   packetId,
-                  record.recordId.c_str(),
-                  TELEMETRY_TOPIC,
-                  THINGSBOARD_MQTT_QOS);
-    Serial.printf("[MQTT] Payload sent: %s\\n", normalizedPayload);
+                  record.recordId.c_str());
 }
 
 // ------------------------------------------------------------
-// EVENT QUEUE
+// IRRIGATION EVENT STORAGE
 // ------------------------------------------------------------
 
-void enqueueIrrigationEvent(const char* event,
-                            const char* state,
-                            const RTCData& rtc) {
-    if (!storageReady || event == nullptr || state == nullptr ||
-        event[0] == '\0' || state[0] == '\0') {
+void enqueueIrrigationEvent(const char *event,
+                           const char *state,
+                           const RTCData &rtc) {
+    if (!storageReady ||
+        event == nullptr ||
+        state == nullptr ||
+        event[0] == '\0' ||
+        state[0] == '\0') {
         return;
     }
 
     JsonDocument document;
+
     document["event"] = event;
     document["state"] = state;
 
@@ -414,29 +489,42 @@ void enqueueIrrigationEvent(const char* event,
         document["second"] = rtc.second;
     }
 
-    char payload[256];
-    const size_t length = serializeJson(document, payload, sizeof(payload));
+    char payload[EVENT_PAYLOAD_SIZE];
+
+    const size_t length = serializeJson(
+        document,
+        payload,
+        sizeof(payload)
+    );
+
     if (length == 0 || length >= sizeof(payload)) {
         Serial.println("[EVENT] Failed to serialize irrigation event.");
         return;
     }
+
     payload[length] = '\0';
 
     char recordId[41];
-    if (!offlineStorageGenerateRecordId(recordId, sizeof(recordId))) return;
 
-    // Event sengaja dipertahankan lokal karena schema/consumer event
-    // ThingsBoard belum dikonfirmasi pada server Customer ini.
-    if (!offlineStorageEnqueue(recordId,
-                               "landia/irrigation/event",
-                               payload,
-                               true)) {
+    if (!offlineStorageGenerateRecordId(recordId, sizeof(recordId))) {
+        Serial.println("[EVENT] Failed to generate event record ID.");
+        return;
+    }
+
+    // Event masih disimpan lokal. Topic/schema belum dikonfirmasi.
+    if (!offlineStorageEnqueue(
+            recordId,
+            "landia/irrigation/event",
+            payload,
+            true)) {
         Serial.println("[EVENT] Failed to store irrigation event.");
         return;
     }
 
     Serial.printf("[EVENT] Stored locally: %s | %s | %s\n",
-                  recordId, event, state);
+                  recordId,
+                  event,
+                  state);
 }
 
 } // namespace
@@ -450,15 +538,21 @@ void mqttInit() {
     Serial.println("========== LANDIA THINGSBOARD MQTT INIT ==========");
 
     storageReady = offlineStorageBegin();
+
     if (!storageReady) {
-        Serial.println("[OFFLINE] LittleFS unavailable; telemetry queue disabled.");
+        Serial.println("[OFFLINE] LittleFS unavailable. "
+                       "Telemetry queue is disabled.");
     }
 
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
     WiFi.persistent(false);
 
-    mqttClient.setServer(THINGSBOARD_MQTT_HOST, THINGSBOARD_MQTT_PORT);
+    mqttClient.setServer(
+        THINGSBOARD_MQTT_HOST,
+        THINGSBOARD_MQTT_PORT
+    );
+
     mqttClient.setClientId(MQTT_CLIENT_ID);
     mqttClient.setCredentials(THINGSBOARD_DEVICE_TOKEN, nullptr);
     mqttClient.setKeepAlive(30);
@@ -468,7 +562,6 @@ void mqttInit() {
     mqttClient.onDisconnect(onMqttDisconnect);
     mqttClient.onPublish(onMqttPublish);
 
-    // Wi-Fi connection starts asynchronously; setup() does not wait.
     ensureWiFi();
 
     Serial.printf("[MQTT] Initialized: %s:%u | topic=%s | QoS=%d\n",
@@ -479,28 +572,35 @@ void mqttInit() {
 }
 
 void mqttUpdate() {
-    // Consume acknowledgement first so a received PUBACK is not lost
-    // if the disconnect callback is also pending.
-    processPublishAck();
+    bool connectedEvent = false;
+    bool disconnectedEvent = false;
+    uint16_t ackPacketId = 0;
 
-    if (mqttDisconnectedEvent) {
-        mqttDisconnectedEvent = false;
+    consumeMqttEvents(
+        connectedEvent,
+        disconnectedEvent,
+        ackPacketId
+    );
+
+    // ACK diproses terlebih dahulu agar record yang sudah di-ACK
+    // tidak tertahan akibat event disconnect yang berdekatan.
+    processPublishAck(ackPacketId);
+
+    if (disconnectedEvent) {
         mqttConnectPending = false;
 
-        // Broker did not acknowledge the in-flight record.
-        // Keep it in LittleFS and allow retransmission after reconnect.
         if (inFlightPacketId != 0) {
             Serial.printf("[MQTT] Disconnected before PUBACK. "
                           "Retaining record: %s\n",
                           inFlightRecordId.c_str());
+
             inFlightRecordId = "";
             inFlightPacketId = 0;
-            lastPublishAckPacketId = 0;
+            inFlightStartedAt = 0;
         }
     }
 
-    if (mqttConnectedEvent) {
-        mqttConnectedEvent = false;
+    if (connectedEvent) {
         mqttConnectPending = false;
         Serial.println("[MQTT] Connected to ThingsBoard broker.");
     }
@@ -514,21 +614,29 @@ void mqttUpdate() {
 
     if (!mqttClient.connected()) {
         const unsigned long now = millis();
+
         if (!mqttConnectPending &&
             now - lastMqttAttempt >= MQTT_RECONNECT_INTERVAL_MS) {
             lastMqttAttempt = now;
+
             mqttConnectPending = mqttClient.connect();
+
             if (mqttConnectPending) {
                 Serial.println("[MQTT] Connection attempt started.");
             } else {
                 Serial.println("[MQTT] Could not start connection attempt.");
             }
         }
+
         return;
     }
 
     mqttConnectPending = false;
-    processPublishAck();
+
+    // Cek timeout ACK sebelum memulai publish berikutnya.
+    processAckTimeout();
+
+    // Publish maksimum satu record sekaligus.
     publishOneQueuedTelemetry();
 }
 
@@ -540,24 +648,30 @@ bool wifiIsConnected() {
     return WiFi.status() == WL_CONNECTED;
 }
 
-void mqttPublishTelemetry(const DHTData& dht,
-                          const SoilData& soil,
-                          const RainData& rain,
-                          const FlowData& flow,
-                          const WaterLevelData& waterLevel,
-                          const RTCData& rtc) {
-    (void)rtc;
+void mqttPublishTelemetry(const DHTData &dht,
+                         const SoilData &soil,
+                         const RainData &rain,
+                         const FlowData &flow,
+                         const WaterLevelData &waterLevel,
+                         const RTCData &rtc) {
+    (void)rtc; // Timestamp belum dimasukkan ke telemetry payload.
 
     if (!storageReady) {
         Serial.println("[OFFLINE] Cannot queue telemetry: LittleFS unavailable.");
         return;
     }
 
-    enqueueTelemetrySnapshot(dht, soil, rain, flow, waterLevel);
+    enqueueTelemetrySnapshot(
+        dht,
+        soil,
+        rain,
+        flow,
+        waterLevel
+    );
 }
 
-void mqttPublishIrrigationEvent(const char* event,
-                                const char* state,
-                                const RTCData& rtc) {
+void mqttPublishIrrigationEvent(const char *event,
+                               const char *state,
+                               const RTCData &rtc) {
     enqueueIrrigationEvent(event, state, rtc);
 }

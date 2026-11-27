@@ -698,7 +698,10 @@ bool rtcSetDateTime(
     // RESET NTP SYNC TIMER
     // -------------------------------------------------
 
-    lastNtpSuccessMillis = 0;
+    // Waktu manual dipertahankan terlebih dahulu. Jika Wi-Fi
+    // sedang terhubung, NTP tidak langsung menimpa waktu manual
+    // pada update berikutnya; sinkronisasi berkala tetap berjalan.
+    lastNtpSuccessMillis = millis();
 
     Serial.println(
         "[RTC] Time successfully updated manually"
